@@ -71,7 +71,8 @@ func main() {
 	dbPath := flag.String("db", envDefault("DB_PATH", "./dhtsearch.db"), "SQLite database path")
 	crawlEnabled := flag.Bool("crawl", envBool("CRAWL_ENABLED", true), "enable the DHT crawler")
 	dhtPort := flag.Int("dht-port", envInt("DHT_PORT", 0), "DHT UDP listen port (0 = random)")
-	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 16), "metadata fetch worker count")
+	samplers := flag.Int("dht-samplers", envInt("DHT_SAMPLERS", 32), "concurrent BEP 51 sampling workers")
+	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 64), "metadata fetch worker count")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
 	fetchMetadata := flag.Bool("fetch-metadata", envBool("FETCH_METADATA", true), "fetch torrent metadata (false: store bare infohashes)")
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
@@ -112,9 +113,10 @@ func main() {
 
 	// Crawler.
 	cr, err := crawler.Start(crawler.Config{
-		Port:    *dhtPort,
-		Enabled: *crawlEnabled,
-		Logger:  logger,
+		Port:     *dhtPort,
+		Enabled:  *crawlEnabled,
+		Samplers: *samplers,
+		Logger:   logger,
 	})
 	if err != nil {
 		logger.Fatalf("crawler: %v", err)
@@ -122,8 +124,10 @@ func main() {
 	defer cr.Close()
 
 	// Pipeline: infohashes -> metadata -> filter -> store.
+	var fetcher *metadata.Fetcher
 	if *fetchMetadata {
-		fetcher, err := metadata.NewFetcher(metadata.Config{
+		var err error
+		fetcher, err = metadata.NewFetcher(metadata.Config{
 			Workers: *metaWorkers,
 			Timeout: *metaTimeout,
 			Logger:  logger,
@@ -200,8 +204,9 @@ func main() {
 		}
 	}
 
-	// Mirror the crawler's in-memory seen count into the stats table
-	// periodically.
+	// Mirror the crawler's in-memory seen count and the fetch outcome
+	// counters into the stats table periodically. Both are process-local and
+	// monotonic, so only the delta since the last tick is applied.
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
@@ -212,6 +217,11 @@ func main() {
 			case <-t.C:
 				seen := int64(cr.SeenCount())
 				st.IncrStat("seen", seen-prevSeen(&seen))
+				if fetcher != nil {
+					_, timedOut, failed := fetcher.Stats()
+					st.IncrStat("meta_timed_out", timedOut-prevTimedOut(&timedOut))
+					st.IncrStat("meta_failed", failed-prevFailed(&failed))
+				}
 			}
 		}
 	}()
@@ -220,7 +230,16 @@ func main() {
 	srv := &http.Server{
 		Addr: *addr,
 		Handler: api.New(st, func() api.CrawlerStatus {
-			return api.CrawlerStatus{Enabled: cr.Enabled(), Seen: int64(cr.SeenCount())}
+			cs := cr.Stats()
+			return api.CrawlerStatus{
+				Enabled:   cr.Enabled(),
+				Seen:      int64(cr.SeenCount()),
+				Nodes:     cs.Nodes,
+				Queued:    cs.Queued,
+				Sampled:   cs.Sampled,
+				SampleErr: cs.SampleErr,
+				Harvested: cs.Harvested,
+			}
 		}, logger).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -238,13 +257,30 @@ func main() {
 	logger.Printf("shutdown complete")
 }
 
-var lastSeen int64
+var (
+	lastSeen     int64
+	lastTimedOut int64
+	lastFailed   int64
+)
 
 // prevSeen returns the previously reported seen count and records the new
 // one, so the stats mirror only applies deltas.
 func prevSeen(cur *int64) int64 {
 	prev := lastSeen
 	lastSeen = *cur
+	return prev
+}
+
+// prevTimedOut and prevFailed do the same for the fetch outcome counters.
+func prevTimedOut(cur *int64) int64 {
+	prev := lastTimedOut
+	lastTimedOut = *cur
+	return prev
+}
+
+func prevFailed(cur *int64) int64 {
+	prev := lastFailed
+	lastFailed = *cur
 	return prev
 }
 

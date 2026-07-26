@@ -31,7 +31,27 @@ const (
 	seenCapacity  = 1 << 18 // ~260k infohashes remembered for dedup
 	knownCapacity = 256     // recent infohashes used for active queries
 	channelSize   = 4096
-	probeInterval = 20 * time.Second
+
+	// Sampling. Discovery is dominated by how many distinct nodes we can ask
+	// for samples, so the samplers run concurrently over a queue of nodes
+	// rather than probing one node on a timer.
+	defaultSamplers = 32
+	sampleTimeout   = 10 * time.Second
+	nodeQueueSize   = 8192
+	nodeTrackMax    = 1 << 16 // addresses remembered for resample scheduling
+
+	// BEP 51 lets a node advertise how often its sample set is worth
+	// re-reading. Clamp it: some nodes report absurd values, and a node we
+	// never revisit is a node whose new torrents we never see.
+	defaultResample = 15 * time.Minute
+	minResample     = 1 * time.Minute
+	maxResample     = 2 * time.Hour
+
+	// Refilling the queue from the routing table, and widening it with
+	// random-target find_node so we keep meeting nodes the table does not
+	// already hold.
+	refillInterval = 5 * time.Second
+	walkInterval   = 2 * time.Second
 )
 
 // Config controls the crawler.
@@ -40,22 +60,49 @@ type Config struct {
 	Port int
 	// Enabled=false disables the crawler entirely (offline environments).
 	Enabled bool
+	// Samplers is the number of concurrent BEP 51 sampling workers.
+	// 0 selects defaultSamplers.
+	Samplers int
 	// Logger, nil for log.Default().
 	Logger *log.Logger
 }
 
 // Crawler is a running (or disabled) DHT crawler.
 type Crawler struct {
-	enabled bool
-	server  *dht.Server
-	out     chan string
-	cancel  context.CancelFunc
-	logger  *log.Logger
+	enabled  bool
+	samplers int
+	server   *dht.Server
+	out      chan string
+	cancel   context.CancelFunc
+	logger   *log.Logger
 
 	mu    sync.Mutex
 	seen  map[[20]byte]struct{}
 	ring  [][20]byte // FIFO eviction order for seen
 	known [][20]byte // recent infohashes for active probing
+
+	// Sampling state. nodeQ carries nodes waiting to be sampled; nodeNext
+	// records the earliest time each address is worth sampling again, which
+	// keeps the samplers off nodes they just read.
+	nodeQ    chan krpc.NodeAddr
+	nodeMu   sync.Mutex
+	nodeNext map[string]time.Time
+
+	// Counters, read via Stats.
+	statMu    sync.Mutex
+	sampled   int64 // sample_infohashes queries answered
+	sampleErr int64 // queries that failed or returned nothing
+	harvested int64 // infohashes returned by samples (before dedup)
+}
+
+// Stats reports sampler activity. Nodes is the routing table size, which is
+// the pool the samplers draw from — if it collapses, discovery stalls.
+type Stats struct {
+	Nodes     int
+	Queued    int
+	Sampled   int64
+	SampleErr int64
+	Harvested int64
 }
 
 // Start launches the crawler. With Enabled=false it returns a Crawler whose
@@ -65,10 +112,17 @@ func Start(cfg Config) (*Crawler, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
+	samplers := cfg.Samplers
+	if samplers <= 0 {
+		samplers = defaultSamplers
+	}
 	c := &Crawler{
-		enabled: cfg.Enabled,
-		logger:  logger,
-		seen:    make(map[[20]byte]struct{}, seenCapacity),
+		enabled:  cfg.Enabled,
+		samplers: samplers,
+		logger:   logger,
+		seen:     make(map[[20]byte]struct{}, seenCapacity),
+		nodeQ:    make(chan krpc.NodeAddr, nodeQueueSize),
+		nodeNext: make(map[string]time.Time),
 	}
 	if !cfg.Enabled {
 		return c, nil
@@ -98,8 +152,18 @@ func Start(cfg Config) (*Crawler, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
 	go c.bootstrap(ctx)
-	go c.probeLoop(ctx)
-	logger.Printf("crawler: DHT node listening on %s", conn.LocalAddr())
+	// The library does not run this itself: NewServer's contract is that the
+	// caller starts it once the server is set up. Without it the routing
+	// table is whatever the initial bootstrap returned and slowly decays, so
+	// the samplers run out of nodes to ask.
+	go c.server.TableMaintainer()
+	go c.refillLoop(ctx)
+	go c.walkLoop(ctx)
+	for i := 0; i < c.samplers; i++ {
+		go c.sampleLoop(ctx)
+	}
+	logger.Printf("crawler: DHT node listening on %s (%d samplers)",
+		conn.LocalAddr(), c.samplers)
 	return c, nil
 }
 
@@ -115,6 +179,22 @@ func (c *Crawler) SeenCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.seen)
+}
+
+// Stats returns sampler counters. Safe on a disabled crawler.
+func (c *Crawler) Stats() Stats {
+	c.statMu.Lock()
+	st := Stats{
+		Sampled:   c.sampled,
+		SampleErr: c.sampleErr,
+		Harvested: c.harvested,
+	}
+	c.statMu.Unlock()
+	if c.server != nil {
+		st.Nodes = c.server.NumNodes()
+	}
+	st.Queued = len(c.nodeQ)
+	return st
 }
 
 // Close shuts the crawler down.
@@ -177,11 +257,30 @@ func (c *Crawler) bootstrap(ctx context.Context) {
 	}
 }
 
-// probeLoop periodically issues get_peers for recently seen infohashes and
-// sample_infohashes (BEP 51) requests to random known nodes, harvesting any
-// infohashes that come back.
-func (c *Crawler) probeLoop(ctx context.Context) {
-	t := time.NewTicker(probeInterval)
+// refillLoop keeps the sampler queue fed from the routing table. Nodes that
+// were sampled recently are skipped by enqueue, so this re-offers the whole
+// table cheaply and only the due ones get through.
+func (c *Crawler) refillLoop(ctx context.Context) {
+	t := time.NewTicker(refillInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		for _, n := range c.server.Nodes() {
+			c.enqueueNode(n.Addr)
+		}
+	}
+}
+
+// walkLoop widens coverage beyond the routing table. find_node against a
+// random target returns the nodes closest to it, which is how we reach parts
+// of the ID space our own table does not cover — and each new node is a new
+// sample set. Without this the samplers keep re-reading the same neighbours.
+func (c *Crawler) walkLoop(ctx context.Context) {
+	t := time.NewTicker(walkInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -194,22 +293,137 @@ func (c *Crawler) probeLoop(ctx context.Context) {
 			continue
 		}
 		node := nodes[randIntn(len(nodes))]
-		addr := dht.NewAddr(node.Addr.UDP())
+		res := c.server.FindNode(
+			dht.NewAddr(node.Addr.UDP()), int160.FromByteArray(randomID()),
+			dht.QueryRateLimiting{},
+		)
+		c.absorbNodes(res)
 
-		// BEP 51: ask for a sample of the node's stored infohashes.
-		if res := c.server.Query(ctx, addr, "sample_infohashes", dht.QueryInput{
-			MsgArgs: krpc.MsgArgs{ID: c.server.ID()},
-		}); res.Err == nil && res.Reply.R != nil && res.Reply.R.Samples != nil {
-			for _, ih := range *res.Reply.R.Samples {
-				c.push(ih)
-			}
-		}
-
-		// Follow up on a recently seen infohash.
+		// Piggyback a get_peers for something recently seen: it keeps this
+		// node in other peers' routing tables, which is what makes inbound
+		// get_peers traffic (the passive half of discovery) arrive at all.
 		if ih, ok := c.randomKnown(); ok {
-			c.server.GetPeers(ctx, addr, int160.FromByteArray(ih), false, dht.QueryRateLimiting{})
+			c.server.GetPeers(ctx, dht.NewAddr(node.Addr.UDP()),
+				int160.FromByteArray(ih), false, dht.QueryRateLimiting{})
 		}
 	}
+}
+
+// sampleLoop pulls nodes off the queue and asks each for a sample of the
+// infohashes it knows (BEP 51). This is the active half of discovery and the
+// one that scales: every distinct node answers with up to a few dozen
+// infohashes we would otherwise have to wait for peers to announce.
+func (c *Crawler) sampleLoop(ctx context.Context) {
+	for {
+		var addr krpc.NodeAddr
+		select {
+		case <-ctx.Done():
+			return
+		case addr = <-c.nodeQ:
+		}
+		c.sampleNode(ctx, addr)
+	}
+}
+
+func (c *Crawler) sampleNode(ctx context.Context, na krpc.NodeAddr) {
+	qctx, cancel := context.WithTimeout(ctx, sampleTimeout)
+	defer cancel()
+
+	// The target is required by BEP 51 and is not cosmetic: it selects which
+	// part of the ID space the node reports on, and its reply carries the
+	// nodes closest to that target. Randomising it per query is what turns
+	// repeated sampling into a walk instead of a re-read.
+	res := c.server.Query(qctx, dht.NewAddr(na.UDP()), "sample_infohashes", dht.QueryInput{
+		MsgArgs:      krpc.MsgArgs{ID: c.server.ID(), Target: randomID()},
+		RateLimiting: dht.QueryRateLimiting{},
+	})
+	c.absorbNodes(res)
+
+	if res.Err != nil || res.Reply.R == nil || res.Reply.R.Samples == nil {
+		c.bump(&c.sampleErr)
+		return
+	}
+	samples := *res.Reply.R.Samples
+	c.bump(&c.sampled)
+	c.addStat(&c.harvested, int64(len(samples)))
+	for _, ih := range samples {
+		c.push(ih)
+	}
+	c.scheduleResample(na, res.Reply.R.Interval)
+}
+
+// scheduleResample honours the node's advertised refresh interval, clamped so
+// a hostile or broken value cannot park a node forever or turn it into a hot
+// loop.
+func (c *Crawler) scheduleResample(na krpc.NodeAddr, interval *int64) {
+	d := defaultResample
+	if interval != nil && *interval > 0 {
+		d = time.Duration(*interval) * time.Second
+	}
+	d = min(max(d, minResample), maxResample)
+	c.nodeMu.Lock()
+	c.nodeNext[na.String()] = time.Now().Add(d)
+	c.nodeMu.Unlock()
+}
+
+// absorbNodes feeds the nodes carried by a query reply back into the queue.
+func (c *Crawler) absorbNodes(res dht.QueryResult) {
+	if res.Reply.R == nil {
+		return
+	}
+	for _, n := range res.Reply.R.Nodes {
+		c.enqueueNode(n.Addr)
+	}
+	for _, n := range res.Reply.R.Nodes6 {
+		c.enqueueNode(n.Addr)
+	}
+}
+
+// enqueueNode offers a node to the samplers, dropping it when it is not due
+// for a resample or the queue is full. Dropping is correct here: the routing
+// table refill re-offers everything a few seconds later, and blocking would
+// stall whichever query reply we are walking.
+func (c *Crawler) enqueueNode(na krpc.NodeAddr) {
+	if na.Port == 0 {
+		return
+	}
+	key := na.String()
+	now := time.Now()
+
+	c.nodeMu.Lock()
+	if next, ok := c.nodeNext[key]; ok && now.Before(next) {
+		c.nodeMu.Unlock()
+		return
+	}
+	if len(c.nodeNext) >= nodeTrackMax {
+		// Cheap bound: forget everything rather than track insertion order.
+		// Re-learning a node costs one extra query, so the reset is harmless
+		// and keeps the map from growing without limit.
+		c.nodeNext = make(map[string]time.Time, nodeTrackMax/2)
+	}
+	// Reserve the node now so the other samplers skip it while this query is
+	// in flight; a successful sample overwrites this with the real interval.
+	c.nodeNext[key] = now.Add(minResample)
+	c.nodeMu.Unlock()
+
+	select {
+	case c.nodeQ <- na:
+	default:
+	}
+}
+
+func randomID() [20]byte {
+	var id [20]byte
+	rand.Read(id[:])
+	return id
+}
+
+func (c *Crawler) bump(p *int64) { c.addStat(p, 1) }
+
+func (c *Crawler) addStat(p *int64, n int64) {
+	c.statMu.Lock()
+	*p += n
+	c.statMu.Unlock()
 }
 
 func (c *Crawler) randomKnown() ([20]byte, bool) {

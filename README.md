@@ -31,6 +31,16 @@
 ```
 
 - `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、SQLite 存储（modernc.org/sqlite，无 cgo）、REST API（标准库 net/http）
+
+### 发现速度
+
+infohash 来自两条路径，**主动的那条决定吞吐**：
+
+- **被动**：别的节点发来的 `get_peers` / `announce_peer`。只在公网可达时才有量，NAT/VPN 后面基本为零。
+- **主动（BEP-51）**：`DHT_SAMPLERS` 个 worker 并发对路由表里的节点发 `sample_infohashes`，每个节点一次能返回几十个 infohash。查询带随机 `target`，回包里的节点又会入队，于是采样本身就是一次 ID 空间游走；每个节点按它自己声明的 `interval`（钳在 1 分钟～2 小时）重采。
+- 路由表由 `TableMaintainer` 维护 + 定时随机 `find_node` 拓宽——**路由表空了发现就会停**，`/api/stats` 的 `crawler.nodes` 就是看这个的。
+
+`crawler.harvested / crawler.sampled` 是每次采样的平均产出；`fetch.timed_out` 占比高说明瓶颈已经从发现转移到元数据获取，该加 `META_WORKERS` 了。
 - `web/` — Next.js 前端（App Router + Tailwind，服务端渲染搜索结果）
 
 ## 快速开始
@@ -57,7 +67,8 @@ CRAWL_ENABLED=false go run ./cmd/server --seed-demo
 | `DB_PATH` | `./dhtsearch.db` | SQLite 路径 |
 | `CRAWL_ENABLED` | `true` | 是否启动 DHT 爬虫 |
 | `DHT_PORT` | `0`（随机） | DHT UDP 端口 |
-| `META_WORKERS` | `16` | 元数据并发 worker 数 |
+| `DHT_SAMPLERS` | `32` | BEP-51 并发采样 worker 数（发现速度的主要旋钮） |
+| `META_WORKERS` | `64` | 元数据并发 worker 数 |
 | `META_TIMEOUT` | `45s` | 单个元数据获取超时 |
 | `FETCH_METADATA` | `true` | 是否获取元数据（false 时只收 infohash） |
 | `MIN_TORRENT_SIZE` | `104857600`（100 MiB） | 低于此总体积的种子不入库 |
