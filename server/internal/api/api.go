@@ -17,10 +17,18 @@ const (
 	defaultPerPage = 20
 )
 
-// CrawlerStatus describes the crawler for the stats endpoint.
+// CrawlerStatus describes the crawler for the stats endpoint. The sampler
+// fields are the ones to watch when discovery looks slow: Nodes is the pool
+// the samplers draw from, and Harvested/Sampled is the average yield per
+// answered query.
 type CrawlerStatus struct {
-	Enabled bool  `json:"enabled"`
-	Seen    int64 `json:"seen_infohashes"`
+	Enabled   bool  `json:"enabled"`
+	Seen      int64 `json:"seen_infohashes"`
+	Nodes     int   `json:"nodes"`
+	Queued    int   `json:"queued_nodes"`
+	Sampled   int64 `json:"sampled"`
+	SampleErr int64 `json:"sample_errors"`
+	Harvested int64 `json:"harvested"`
 }
 
 // Server serves the search API.
@@ -137,6 +145,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"adult_filtered": counters["adult_filtered"],
 		"spam_filtered":  counters["spam_filtered"],
 		"size_filtered":  counters["size_filtered"],
+		// Metadata fetch outcomes. A timeout share near 100% means the
+		// fetch pool, not discovery, is what caps indexing throughput.
+		"fetch": map[string]any{
+			"fetched":   counters["fetched"],
+			"timed_out": counters["meta_timed_out"],
+			"failed":    counters["meta_failed"],
+		},
 		"moderation": map[string]any{
 			"reviewed":      counters["llm_reviewed"],
 			"adult_removed": counters["llm_adult_removed"],
