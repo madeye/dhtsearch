@@ -15,8 +15,10 @@ import (
 
 	"dhtsearch/server/internal/api"
 	"dhtsearch/server/internal/crawler"
+	"dhtsearch/server/internal/envfile"
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/metadata"
+	"dhtsearch/server/internal/moderator"
 	"dhtsearch/server/internal/store"
 )
 
@@ -46,8 +48,24 @@ func envInt(key string, fallback int) int {
 	return fallback
 }
 
+func envInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
 func main() {
 	logger := log.Default()
+
+	// Load .env before reading any env-backed default. Real environment
+	// variables take precedence over the file.
+	envPath := envDefault("ENV_FILE", ".env")
+	if err := envfile.Load(envPath); err != nil {
+		logger.Printf("env: %s: %v", envPath, err)
+	}
 
 	addr := flag.String("addr", envDefault("HTTP_ADDR", ":8080"), "HTTP listen address")
 	dbPath := flag.String("db", envDefault("DB_PATH", "./dhtsearch.db"), "SQLite database path")
@@ -57,7 +75,27 @@ func main() {
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
 	fetchMetadata := flag.Bool("fetch-metadata", envBool("FETCH_METADATA", true), "fetch torrent metadata (false: store bare infohashes)")
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
+	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
+		"skip torrents whose total size is below this many bytes")
+
+	// LLM moderation pass.
+	modEnabled := flag.Bool("moderate", envBool("MODERATION_ENABLED", true),
+		"enable the periodic LLM moderation pass (requires OPENAI_API_KEY)")
+	modBaseURL := flag.String("moderate-base-url", envDefault("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
+		"OpenAI-compatible API base URL")
+	modModel := flag.String("moderate-model", envDefault("OPENAI_MODEL", "deepseek-v4-flash"),
+		"chat model used for moderation")
+	modInterval := flag.Duration("moderate-interval", envDuration("MODERATION_INTERVAL", time.Hour),
+		"how often to run the moderation pass")
+	modBatch := flag.Int("moderate-batch", envInt("MODERATION_BATCH_SIZE", 50),
+		"torrent titles per moderation request")
+	modMaxBatches := flag.Int("moderate-max-batches", envInt("MODERATION_MAX_BATCHES", 40),
+		"max batches per moderation pass (0 = unlimited)")
+	modDryRun := flag.Bool("moderate-dry-run", envBool("MODERATION_DRY_RUN", false),
+		"log what moderation would delete without deleting it")
 	flag.Parse()
+
+	filter.MinTotalSize = *minSize
 
 	st, err := store.Open(*dbPath)
 	if err != nil {
@@ -104,6 +142,10 @@ func main() {
 				st.IncrStat("spam_filtered", 1)
 				return
 			}
+			if res.TooSmall {
+				st.IncrStat("size_filtered", 1)
+				return
+			}
 			if err := st.Upsert(store.Torrent{
 				InfoHash:  rec.InfoHash,
 				Name:      rec.Name,
@@ -133,6 +175,29 @@ func main() {
 				st.IncrStat("seen", 1)
 			}
 		}()
+	}
+
+	// Periodic LLM moderation pass over rows the static filter admitted.
+	if *modEnabled {
+		key := os.Getenv("OPENAI_API_KEY")
+		if key == "" {
+			logger.Printf("moderator: disabled (OPENAI_API_KEY not set; see env.example)")
+		} else {
+			mod, err := moderator.New(st, moderator.Config{
+				BaseURL:    *modBaseURL,
+				APIKey:     key,
+				Model:      *modModel,
+				Interval:   *modInterval,
+				BatchSize:  *modBatch,
+				MaxBatches: *modMaxBatches,
+				DryRun:     *modDryRun,
+				Logger:     logger,
+			})
+			if err != nil {
+				logger.Fatalf("moderator: %v", err)
+			}
+			go mod.Run(ctx)
+		}
 	}
 
 	// Mirror the crawler's in-memory seen count into the stats table

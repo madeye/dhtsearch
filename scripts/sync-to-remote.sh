@@ -37,10 +37,17 @@ DELTA="$TMP_DIR/delta.db"
 # Export rows newer than the watermark. A single query is a consistent
 # snapshot; the new watermark is taken from the delta itself, so rows written
 # during the export are picked up by the next run instead of being skipped.
+#
+# Columns are listed explicitly rather than SELECT *: the delta schema then
+# stays stable even when the two ends run different binaries, and reviewed_at
+# is deliberately left behind so the remote applies its own moderation policy
+# to synced rows.
 "$SQLITE" "$LOCAL_DB" <<SQL
 PRAGMA busy_timeout=5000;
 ATTACH '$DELTA' AS d;
-CREATE TABLE d.torrents AS SELECT * FROM torrents WHERE created_at > $LAST;
+CREATE TABLE d.torrents AS
+  SELECT info_hash, name, total_size, file_count, files_json, created_at
+  FROM torrents WHERE created_at > $LAST;
 SQL
 
 COUNT=$("$SQLITE" "$DELTA" "SELECT COUNT(*) FROM torrents;")
@@ -53,10 +60,13 @@ NEW_MARK=$("$SQLITE" "$DELTA" "SELECT MAX(created_at) FROM torrents;")
 REMOTE_TMP=$(ssh "$DEPLOY_HOST" "mktemp /tmp/dhtsearch-sync.XXXXXX.db")
 scp -q "$DELTA" "$DEPLOY_HOST:$REMOTE_TMP"
 
+# Rows the remote's moderation pass already rejected must not come back.
 ssh "$DEPLOY_HOST" "$SQLITE '$DEPLOY_DIR/data/dhtsearch.db' \"
 PRAGMA busy_timeout=10000;
 ATTACH '$REMOTE_TMP' AS d;
-INSERT OR IGNORE INTO torrents SELECT * FROM d.torrents;
+INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files_json, created_at)
+  SELECT info_hash, name, total_size, file_count, files_json, created_at FROM d.torrents
+  WHERE info_hash NOT IN (SELECT info_hash FROM blocked);
 \" && rm -f '$REMOTE_TMP'"
 
 echo "$NEW_MARK" > "$WATERMARK_FILE"
