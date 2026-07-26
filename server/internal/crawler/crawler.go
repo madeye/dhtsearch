@@ -151,11 +151,12 @@ func Start(cfg Config) (*Crawler, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
-	go c.bootstrap(ctx)
 	// The library does not run this itself: NewServer's contract is that the
 	// caller starts it once the server is set up. Without it the routing
 	// table is whatever the initial bootstrap returned and slowly decays, so
-	// the samplers run out of nodes to ask.
+	// the samplers run out of nodes to ask. It bootstraps on its own, so an
+	// explicit Bootstrap alongside it only races and logs "already
+	// bootstrapping".
 	go c.server.TableMaintainer()
 	go c.refillLoop(ctx)
 	go c.walkLoop(ctx)
@@ -248,12 +249,6 @@ func (c *Crawler) push(ih [20]byte) {
 		case out <- hex.EncodeToString(ih[:]):
 		default: // downstream busy; drop rather than block the DHT handler
 		}
-	}
-}
-
-func (c *Crawler) bootstrap(ctx context.Context) {
-	if _, err := c.server.BootstrapContext(ctx); err != nil && ctx.Err() == nil {
-		c.logger.Printf("crawler: bootstrap: %v", err)
 	}
 }
 
