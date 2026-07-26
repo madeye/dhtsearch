@@ -1,0 +1,6 @@
+server/dhtsearch.db*
+server/server
+.DS_Store
+bin/
+data/
+.deploy.env

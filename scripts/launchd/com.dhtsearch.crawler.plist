@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.dhtsearch.crawler</string>
+    <key>ProgramArguments</key>
+    <array><string>__PROJECT_DIR__/bin/dhtsearch-server</string></array>
+    <key>WorkingDirectory</key><string>__PROJECT_DIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HTTP_ADDR</key><string>127.0.0.1:8089</string>
+        <key>DB_PATH</key><string>__PROJECT_DIR__/data/local.db</string>
+        <key>CRAWL_ENABLED</key><string>true</string>
+        <key>META_WORKERS</key><string>16</string>
+    </dict>
+    <key>KeepAlive</key><true/>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>__PROJECT_DIR__/data/logs/crawler.log</string>
+    <key>StandardErrorPath</key><string>__PROJECT_DIR__/data/logs/crawler.log</string>
+</dict>
+</plist>
