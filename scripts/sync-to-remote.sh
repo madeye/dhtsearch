@@ -7,9 +7,14 @@
 # INSERT OR IGNORE (dedup by info_hash primary key). Only the delta crosses
 # the network.
 #
-# The remote host is NOT stored here. It comes from $DEPLOY_HOST or the
-# gitignored .deploy.env file in the repo root:
+# The remote host is NOT stored here. It comes from $DEPLOY_HOST or a
+# gitignored .deploy.env, looked up in the repo root and then in the state dir:
 #   echo 'DEPLOY_HOST=user@example.com' > .deploy.env
+#
+# The crawler's database lives in the state dir rather than the checkout, so
+# the launchd agent can reach it — see scripts/launchd/install.sh. Override
+# with DHTSEARCH_STATE_DIR, or point LOCAL_DB/WATERMARK_FILE somewhere else
+# outright.
 #
 # Optional: DEPLOY_DIR (default /opt/dhtsearch), SYNC_INTERVAL is controlled
 # by the scheduler (launchd/cron), not this script.
@@ -17,12 +22,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[ -f "$ROOT_DIR/.deploy.env" ] && . "$ROOT_DIR/.deploy.env"
+STATE_DIR="${DHTSEARCH_STATE_DIR:-$HOME/Library/Application Support/dhtsearch}"
+for f in "$ROOT_DIR/.deploy.env" "$STATE_DIR/.deploy.env"; do
+    # `if` rather than `[ ... ] && .` so a miss on the last candidate does not
+    # make the loop exit non-zero and trip `set -e`.
+    if [ -f "$f" ]; then . "$f"; break; fi
+done
 
 DEPLOY_HOST="${DEPLOY_HOST:?DEPLOY_HOST is required (env or .deploy.env)}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/dhtsearch}"
-LOCAL_DB="$ROOT_DIR/data/local.db"
-WATERMARK_FILE="$ROOT_DIR/data/last_sync_ts"
+LOCAL_DB="${LOCAL_DB:-$STATE_DIR/local.db}"
+WATERMARK_FILE="${WATERMARK_FILE:-$STATE_DIR/last_sync_ts}"
 SQLITE=/usr/bin/sqlite3
 
 [ -f "$LOCAL_DB" ] || { echo "local db not found: $LOCAL_DB"; exit 1; }
