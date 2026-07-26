@@ -12,6 +12,12 @@
         <key>DB_PATH</key><string>__STATE_DIR__/local.db</string>
         <key>CRAWL_ENABLED</key><string>true</string>
         <key>META_WORKERS</key><string>16</string>
+        <!-- Fixed DHT port so the router can forward a stable UDP port to this
+             host. With the default (0) the kernel picks a new port on every
+             restart and no forwarding rule can keep up. Discovery depends on
+             inbound UDP: peers must be able to reach this node with get_peers
+             queries and BEP-51 replies. -->
+        <key>DHT_PORT</key><string>46881</string>
     </dict>
     <key>KeepAlive</key><true/>
     <key>RunAtLoad</key><true/>
