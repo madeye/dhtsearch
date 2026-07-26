@@ -226,6 +226,13 @@ func (c *Crawler) onQuery(query *krpc.Msg, _ net.Addr) bool {
 
 // push records an infohash if new, with FIFO eviction over the capacity.
 func (c *Crawler) push(ih [20]byte) {
+	// The all-zero infohash is not a torrent: peers send it in malformed or
+	// probing queries, and BEP 51 samples occasionally carry it. It has to be
+	// dropped here because anacrolix/torrent panics rather than errors when
+	// AddMagnet is handed one, which takes the whole process down.
+	if ih == ([20]byte{}) {
+		return
+	}
 	c.mu.Lock()
 	if _, ok := c.seen[ih]; ok {
 		c.mu.Unlock()
