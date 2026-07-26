@@ -63,6 +63,59 @@ func TestUpsertAndSearch(t *testing.T) {
 	}
 }
 
+func TestUnreviewedMarkReviewedAndBlock(t *testing.T) {
+	s := openTest(t)
+	for _, r := range []Torrent{
+		{InfoHash: "aa", Name: "keep me", TotalSize: 1 << 30, CreatedAt: 100},
+		{InfoHash: "bb", Name: "drop me", TotalSize: 1 << 30, CreatedAt: 200},
+	} {
+		if err := s.Upsert(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cands, err := s.Unreviewed(10)
+	if err != nil || len(cands) != 2 {
+		t.Fatalf("unreviewed: %d cands err=%v", len(cands), err)
+	}
+	if cands[0].InfoHash != "aa" {
+		t.Fatalf("expected oldest first, got %q", cands[0].InfoHash)
+	}
+
+	n, err := s.Block([]string{"bb"}, []string{"drop me"}, "adult", 500)
+	if err != nil || n != 1 {
+		t.Fatalf("block: n=%d err=%v", n, err)
+	}
+	if err := s.MarkReviewed([]string{"aa", "bb"}, 500); err != nil {
+		t.Fatal(err)
+	}
+
+	if cands, err = s.Unreviewed(10); err != nil || len(cands) != 0 {
+		t.Fatalf("after review: %d cands err=%v", len(cands), err)
+	}
+	if pending, _ := s.PendingReviewCount(); pending != 0 {
+		t.Fatalf("pending=%d, want 0", pending)
+	}
+	if blocked, _ := s.BlockedCount(); blocked != 1 {
+		t.Fatalf("blocked=%d, want 1", blocked)
+	}
+
+	// A blocked infohash must not come back via the crawler.
+	if err := s.Upsert(Torrent{InfoHash: "bb", Name: "drop me", TotalSize: 1 << 30, CreatedAt: 900}); err != nil {
+		t.Fatal(err)
+	}
+	if total, _ := s.Count(); total != 1 {
+		t.Fatalf("count=%d, want 1 (blocked hash was re-added)", total)
+	}
+}
+
+func TestBlockRejectsMismatchedNames(t *testing.T) {
+	s := openTest(t)
+	if _, err := s.Block([]string{"aa", "bb"}, []string{"only one"}, "spam", 1); err == nil {
+		t.Fatal("expected error for mismatched hashes/names")
+	}
+}
+
 func TestStats(t *testing.T) {
 	s := openTest(t)
 	if err := s.IncrStat("seen", 3); err != nil {

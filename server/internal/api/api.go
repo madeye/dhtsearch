@@ -120,12 +120,31 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "stats failed")
 		return
 	}
+	blocked, err := s.st.BlockedCount()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stats failed")
+		return
+	}
+	pending, err := s.st.PendingReviewCount()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stats failed")
+		return
+	}
 	resp := map[string]any{
 		"torrents":       total,
 		"seen":           counters["seen"],
 		"fetched":        counters["fetched"],
 		"adult_filtered": counters["adult_filtered"],
 		"spam_filtered":  counters["spam_filtered"],
+		"size_filtered":  counters["size_filtered"],
+		"moderation": map[string]any{
+			"reviewed":      counters["llm_reviewed"],
+			"adult_removed": counters["llm_adult_removed"],
+			"spam_removed":  counters["llm_spam_removed"],
+			"errors":        counters["llm_errors"],
+			"pending":       pending,
+			"blocked":       blocked,
+		},
 	}
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()

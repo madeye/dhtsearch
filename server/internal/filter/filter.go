@@ -17,10 +17,20 @@ type File struct {
 
 // Result is the outcome of Check. Reasons explains every signal that hit.
 type Result struct {
-	Adult   bool     `json:"adult"`
-	Spam    bool     `json:"spam"`
-	Reasons []string `json:"reasons,omitempty"`
+	Adult    bool     `json:"adult"`
+	Spam     bool     `json:"spam"`
+	TooSmall bool     `json:"too_small"`
+	Reasons  []string `json:"reasons,omitempty"`
 }
+
+// Rejected reports whether any signal fired, i.e. the torrent must not be
+// indexed.
+func (r Result) Rejected() bool { return r.Adult || r.Spam || r.TooSmall }
+
+// MinTotalSize is the smallest torrent worth indexing. Anything below it is
+// dropped as junk (fake stubs, single images, link/readme-only torrents).
+// Overridable at startup from MIN_TORRENT_SIZE.
+var MinTotalSize int64 = 100 << 20 // 100 MiB
 
 const (
 	maxNameLen        = 300
@@ -143,6 +153,14 @@ func Check(name string, files []File, totalSize int64) Result {
 	} else if totalSize > maxTotalSize {
 		add("total size %d exceeds 20 TiB", totalSize)
 		r.Spam = true
+	}
+
+	// --- Size floor ---
+	// Distinct from spam: the torrent may be perfectly legitimate, just too
+	// small to be worth indexing.
+	if totalSize > 0 && totalSize < MinTotalSize {
+		add("total size %d below minimum %d", totalSize, MinTotalSize)
+		r.TooSmall = true
 	}
 	if len(files) > maxFileCount {
 		add("file count %d exceeds %d", len(files), maxFileCount)

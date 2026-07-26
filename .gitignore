@@ -4,3 +4,9 @@ server/server
 bin/
 data/
 .deploy.env
+
+# Secrets — API keys live here, never in git.
+# The committed template is env.example (no leading dot), so it is not
+# matched by these patterns.
+.env
+.env.*

@@ -173,3 +173,46 @@ func TestReasonsRecorded(t *testing.T) {
 		t.Fatalf("expected multiple reasons, got %v", r.Reasons)
 	}
 }
+
+func TestSizeFloor(t *testing.T) {
+	const mb = 1 << 20
+	cases := []struct {
+		size int64
+		want bool
+	}{
+		{50 * mb, true},   // below the 100 MiB floor
+		{99 * mb, true},   //
+		{100 * mb, false}, // exactly at the floor is kept
+		{700 * mb, false},
+	}
+	for _, tc := range cases {
+		r := Check("Big Buck Bunny 2008 1080p", mkFiles("bbb.mkv"), tc.size)
+		if r.TooSmall != tc.want {
+			t.Errorf("size %d: TooSmall=%v, want %v (%v)", tc.size, r.TooSmall, tc.want, r.Reasons)
+		}
+		// The size floor must not be conflated with spam.
+		if r.Spam {
+			t.Errorf("size %d: wrongly flagged as spam: %v", tc.size, r.Reasons)
+		}
+	}
+}
+
+func TestSizeFloorIsConfigurable(t *testing.T) {
+	old := MinTotalSize
+	defer func() { MinTotalSize = old }()
+	MinTotalSize = 1 << 30
+	if r := Check("Movie 1080p", mkFiles("m.mkv"), 700<<20); !r.TooSmall {
+		t.Errorf("700MB should be too small when floor is 1GB: %+v", r)
+	}
+}
+
+func TestRejectedReportsAnySignal(t *testing.T) {
+	if (Result{}).Rejected() {
+		t.Error("empty result must not be rejected")
+	}
+	for _, r := range []Result{{Adult: true}, {Spam: true}, {TooSmall: true}} {
+		if !r.Rejected() {
+			t.Errorf("%+v should be rejected", r)
+		}
+	}
+}
