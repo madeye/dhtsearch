@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"dhtsearch/server/internal/filter"
@@ -131,4 +133,49 @@ func TestStats(t *testing.T) {
 	if m["seen"] != 5 {
 		t.Fatalf("seen=%d, want 5", m["seen"])
 	}
+}
+
+// A database created before the moderation feature has no reviewed_at column.
+// Open must migrate it in place rather than failing on the statements that
+// reference the column.
+func TestOpenMigratesPreModerationDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE torrents (
+		info_hash  TEXT PRIMARY KEY,
+		name       TEXT NOT NULL,
+		total_size INTEGER NOT NULL,
+		file_count INTEGER NOT NULL,
+		files_json TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	);
+	INSERT INTO torrents VALUES ('aa', 'Sintel 2010', 1024, 1, '[]', 100);`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on pre-migration db: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// The pre-existing row survives and counts as unreviewed.
+	if total, _ := s.Count(); total != 1 {
+		t.Fatalf("count=%d, want 1", total)
+	}
+	n, err := s.PendingReviewCount()
+	if err != nil || n != 1 {
+		t.Fatalf("pending=%d err=%v, want 1", n, err)
+	}
+
+	// Reopening an already-migrated database is a no-op, not an error.
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen migrated db: %v", err)
+	}
+	s2.Close()
 }

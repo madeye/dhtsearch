@@ -69,22 +69,28 @@ CREATE TABLE IF NOT EXISTS blocked (
 	reason     TEXT NOT NULL,
 	name       TEXT NOT NULL,
 	created_at INTEGER NOT NULL
-);
--- Partial index: only unreviewed rows are indexed, so it stays tiny and the
--- moderation sweep never scans the full table.
-CREATE INDEX IF NOT EXISTS idx_torrents_unreviewed
-	ON torrents(created_at) WHERE reviewed_at = 0;`
+);`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// Migrate databases created before reviewed_at existed. SQLite has no
 	// ADD COLUMN IF NOT EXISTS, so a duplicate-column error is the success
-	// case on an already-migrated database.
+	// case on an already-migrated database. This must run before anything
+	// that references reviewed_at — on a pre-migration database the column
+	// does not exist yet and those statements would fail.
 	if _, err := db.Exec(`ALTER TABLE torrents ADD COLUMN reviewed_at INTEGER NOT NULL DEFAULT 0`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column name") {
 		db.Close()
 		return nil, fmt.Errorf("migrate reviewed_at: %w", err)
+	}
+	// Partial index: only unreviewed rows are indexed, so it stays tiny and the
+	// moderation sweep never scans the full table. Created after the migration
+	// above so the column it filters on is guaranteed to exist.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_torrents_unreviewed
+		ON torrents(created_at) WHERE reviewed_at = 0`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create unreviewed index: %w", err)
 	}
 	return &Store{db: db}, nil
 }
