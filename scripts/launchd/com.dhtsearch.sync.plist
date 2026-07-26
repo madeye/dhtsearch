@@ -4,11 +4,11 @@
 <dict>
     <key>Label</key><string>com.dhtsearch.sync</string>
     <key>ProgramArguments</key>
-    <array><string>/bin/bash</string><string>__PROJECT_DIR__/scripts/sync-to-remote.sh</string></array>
-    <key>WorkingDirectory</key><string>__PROJECT_DIR__</string>
+    <array><string>/bin/bash</string><string>__STATE_DIR__/bin/sync-to-remote.sh</string></array>
+    <key>WorkingDirectory</key><string>__STATE_DIR__</string>
     <key>StartInterval</key><integer>1800</integer>
     <key>RunAtLoad</key><false/>
-    <key>StandardOutPath</key><string>__PROJECT_DIR__/data/logs/sync.log</string>
-    <key>StandardErrorPath</key><string>__PROJECT_DIR__/data/logs/sync.log</string>
+    <key>StandardOutPath</key><string>__LOG_DIR__/sync.log</string>
+    <key>StandardErrorPath</key><string>__LOG_DIR__/sync.log</string>
 </dict>
 </plist>

@@ -141,13 +141,24 @@ echo 'DEPLOY_HOST=user@example.com' > .deploy.env   # gitignored
 ./scripts/sync-to-remote.sh                          # 手动同步一次
 ```
 
-原理：本地实例把数据写到 `data/local.db`，脚本按水位线（`data/last_sync_ts`）导出新增行到小 delta 文件，scp 到服务器后 `INSERT OR IGNORE` 合并（按 info_hash 去重），只传输增量。
+原理：本地实例把数据写到 `local.db`，脚本按水位线（`last_sync_ts`）导出新增行到小 delta 文件，scp 到服务器后 `INSERT OR IGNORE` 合并（按 info_hash 去重），只传输增量。
 
 macOS 上可用 launchd 常驻/定时（安装后本地爬虫 API 在 `127.0.0.1:8089`，同步每 30 分钟一次）：
 
 ```bash
-./scripts/launchd/install.sh   # 生成并加载 ~/Library/LaunchAgents/com.dhtsearch.{crawler,sync}.plist
+./scripts/launchd/install.sh   # 构建二进制、安装脚本、加载两个 agent
 ```
+
+拉取新代码后重新执行同一条命令即可更新（会重新编译并 reload agent）。
+
+运行时文件（二进制、数据库、日志、脚本副本）装在 checkout **之外**：
+
+| 路径 | 内容 |
+| --- | --- |
+| `~/Library/Application Support/dhtsearch/` | `bin/`、`local.db`、`last_sync_ts`、`.deploy.env`（可用 `DHTSEARCH_STATE_DIR` 覆盖） |
+| `~/Library/Logs/dhtsearch/` | `crawler.log`、`sync.log` |
+
+> 这不是洁癖：launchd agent 对非系统卷（`/Volumes/...`）没有 TCC 权限，仓库放在外置盘时 agent **读写都会失败**——spawn 直接以 `EX_CONFIG (78)` 退出，或每次文件操作报 `Operation not permitted`。`$HOME` 下的路径不需要任何授权。
 
 ## 注意
 
