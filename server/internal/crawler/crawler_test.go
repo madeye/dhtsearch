@@ -144,3 +144,27 @@ func TestPushDedupesAndFillsChannel(t *testing.T) {
 		t.Fatalf("hex=%q", got)
 	}
 }
+
+// A zero infohash must never reach the fetcher: anacrolix/torrent panics on
+// it instead of returning an error, which killed the process in production
+// once sampling volume made it a regular occurrence.
+func TestPushDropsZeroInfohash(t *testing.T) {
+	c := testCrawler()
+	c.out = make(chan string, 4)
+
+	c.push([20]byte{})
+	if len(c.out) != 0 {
+		t.Fatalf("emitted=%d, want 0 (zero infohash must be dropped)", len(c.out))
+	}
+	if n := c.SeenCount(); n != 0 {
+		t.Fatalf("seen=%d, want 0 (zero infohash should not occupy the dedup set)", n)
+	}
+
+	// A hash that merely starts with zero bytes is legitimate.
+	var almost [20]byte
+	almost[19] = 1
+	c.push(almost)
+	if len(c.out) != 1 {
+		t.Fatalf("emitted=%d, want 1 (non-zero hash should pass)", len(c.out))
+	}
+}

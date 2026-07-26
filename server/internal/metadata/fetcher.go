@@ -121,6 +121,14 @@ func (f *Fetcher) worker(ctx context.Context, in <-chan string, onRecord func(Re
 // the torrent afterwards.
 func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	rec := Record{InfoHash: hexHash}
+	// AddMagnet panics (rather than returning an error) on a zero or
+	// malformed infohash, and a panic in a worker takes the process with it.
+	// The crawler already filters these, but this is the last line before an
+	// untrusted value reaches the library, so check here too.
+	if !validInfohash(hexHash) {
+		f.count(&f.failed)
+		return rec, false
+	}
 	t, err := f.client.AddMagnet("magnet:?xt=urn:btih:" + hexHash)
 	if err != nil {
 		f.count(&f.failed)
@@ -158,6 +166,27 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 	}
 	f.count(&f.fetched)
 	return rec, true
+}
+
+// validInfohash reports whether s is a 40-character hex infohash that is not
+// all zeros.
+func validInfohash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	zero := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+		if c != '0' {
+			zero = false
+		}
+	}
+	return !zero
 }
 
 func (f *Fetcher) count(p *int64) {
