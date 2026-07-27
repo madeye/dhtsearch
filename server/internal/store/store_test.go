@@ -39,7 +39,7 @@ func TestUpsertAndSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, total, err := s.Search("", 1, 10)
+	items, total, err := s.Search(t.Context(), "", 1, 10)
 	if err != nil || total != 3 || len(items) != 3 {
 		t.Fatalf("empty search: items=%d total=%d err=%v", len(items), total, err)
 	}
@@ -47,7 +47,7 @@ func TestUpsertAndSearch(t *testing.T) {
 		t.Fatalf("expected newest first, got %q", items[0].InfoHash)
 	}
 
-	items, total, err = s.Search("big bunny", 1, 10)
+	items, total, err = s.Search(t.Context(), "big bunny", 1, 10)
 	if err != nil || total != 1 || items[0].InfoHash != "aa" {
 		t.Fatalf("keyword search: items=%v total=%d err=%v", items, total, err)
 	}
@@ -56,13 +56,13 @@ func TestUpsertAndSearch(t *testing.T) {
 	}
 
 	// LIKE wildcards in the query must be literal.
-	_, total, err = s.Search("100%", 1, 10)
+	_, total, err = s.Search(t.Context(), "100%", 1, 10)
 	if err != nil || total != 0 {
 		t.Fatalf("wildcard query: total=%d err=%v", total, err)
 	}
 
 	// Pagination.
-	items, total, err = s.Search("", 2, 2)
+	items, total, err = s.Search(t.Context(), "", 2, 2)
 	if err != nil || total != 3 || len(items) != 1 || items[0].InfoHash != "aa" {
 		t.Fatalf("pagination: items=%v total=%d err=%v", items, total, err)
 	}
@@ -98,10 +98,10 @@ func TestUnreviewedMarkReviewedAndBlock(t *testing.T) {
 	if cands, err = s.Unreviewed(10); err != nil || len(cands) != 0 {
 		t.Fatalf("after review: %d cands err=%v", len(cands), err)
 	}
-	if pending, _ := s.PendingReviewCount(); pending != 0 {
+	if pending, _ := s.PendingReviewCount(t.Context()); pending != 0 {
 		t.Fatalf("pending=%d, want 0", pending)
 	}
-	if blocked, _ := s.BlockedCount(); blocked != 1 {
+	if blocked, _ := s.BlockedCount(t.Context()); blocked != 1 {
 		t.Fatalf("blocked=%d, want 1", blocked)
 	}
 
@@ -109,7 +109,7 @@ func TestUnreviewedMarkReviewedAndBlock(t *testing.T) {
 	if err := s.Upsert(Torrent{InfoHash: "bb", Name: "drop me", TotalSize: 1 << 30, CreatedAt: 900}); err != nil {
 		t.Fatal(err)
 	}
-	if total, _ := s.Count(); total != 1 {
+	if total, _ := s.Count(t.Context()); total != 1 {
 		t.Fatalf("count=%d, want 1 (blocked hash was re-added)", total)
 	}
 }
@@ -129,7 +129,7 @@ func TestStats(t *testing.T) {
 	if err := s.IncrStat("seen", 2); err != nil {
 		t.Fatal(err)
 	}
-	m, err := s.Stats()
+	m, err := s.Stats(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,10 +167,10 @@ func TestOpenMigratesPreModerationDB(t *testing.T) {
 	t.Cleanup(func() { s.Close() })
 
 	// The pre-existing row survives and counts as unreviewed.
-	if total, _ := s.Count(); total != 1 {
+	if total, _ := s.Count(t.Context()); total != 1 {
 		t.Fatalf("count=%d, want 1", total)
 	}
-	n, err := s.PendingReviewCount()
+	n, err := s.PendingReviewCount(t.Context())
 	if err != nil || n != 1 {
 		t.Fatalf("pending=%d err=%v, want 1", n, err)
 	}
@@ -248,7 +248,7 @@ func TestOpenMigratesFilesJSONToCompressedBlob(t *testing.T) {
 		t.Fatalf("stored blob is %d bytes, want (0, %d)", blobLen, len(fj))
 	}
 
-	items, total, err := s.Search("", 1, 10)
+	items, total, err := s.Search(t.Context(), "", 1, 10)
 	if err != nil || total != 2 {
 		t.Fatalf("search after migration: total=%d err=%v", total, err)
 	}
@@ -298,7 +298,7 @@ func TestSetCleanNamesReplacesDisplayNameOnly(t *testing.T) {
 	}
 
 	// Search returns the cleaned title...
-	items, _, err := s.Search("", 1, 10)
+	items, _, err := s.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestSetCleanNamesReplacesDisplayNameOnly(t *testing.T) {
 		t.Errorf("stored name = %q, want the raw title %q", stored, raw)
 	}
 	for _, q := range []string{"spam.net", "Blue Bloods", "Bloods 1080p"} {
-		if _, total, err := s.Search(q, 1, 10); err != nil || total != 1 {
+		if _, total, err := s.Search(t.Context(), q, 1, 10); err != nil || total != 1 {
 			t.Errorf("Search(%q) total = %d err = %v, want 1", q, total, err)
 		}
 	}

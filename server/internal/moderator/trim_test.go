@@ -188,7 +188,7 @@ func TestSweepTrimsAdvertisingFromTitles(t *testing.T) {
 		t.Errorf("Trimmed = %d, want 1", s.Trimmed)
 	}
 
-	items, _, err := st.Search("", 1, 10)
+	items, _, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestTrimmedTorrentIsStillFoundByRawText(t *testing.T) {
 	}
 
 	for _, q := range []string{"spam.net", "Blue Bloods"} {
-		items, total, err := st.Search(q, 1, 10)
+		items, total, err := st.Search(t.Context(), q, 1, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -246,7 +246,7 @@ func TestTrimDisabledLeavesTitlesAlone(t *testing.T) {
 	if s.Trimmed != 0 {
 		t.Errorf("Trimmed = %d, want 0", s.Trimmed)
 	}
-	items, _, err := st.Search("", 1, 10)
+	items, _, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestDryRunTrimsNothing(t *testing.T) {
 	if _, err := m.SweepOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	items, _, err := st.Search("", 1, 10)
+	items, _, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestSweepRejectsRewrittenTitles(t *testing.T) {
 	if s.Trimmed != 0 {
 		t.Errorf("Trimmed = %d, want 0", s.Trimmed)
 	}
-	items, _, err := st.Search("", 1, 10)
+	items, _, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

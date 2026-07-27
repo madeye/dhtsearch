@@ -2,11 +2,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
 
 	"dhtsearch/server/internal/store"
 )
@@ -15,7 +20,37 @@ const (
 	maxQueryLen    = 200
 	maxPageSize    = 100
 	defaultPerPage = 20
+	// maxOffset caps how deep pagination can reach: OFFSET n makes SQLite
+	// walk and discard n rows, so an unbounded page number turns one GET
+	// into a full-table scan. Nothing legitimate paginates 10k results deep.
+	maxOffset = 10_000
+	// admissionWait is how long a search waits for an in-flight slot before
+	// being turned away. Long enough to absorb a burst, short enough that a
+	// flood fails fast instead of stacking goroutines.
+	admissionWait = time.Second
+
+	defaultMaxInflight   = 16
+	defaultSearchTimeout = 10 * time.Second
+	defaultStatsTTL      = 10 * time.Second
 )
+
+// Options tunes the API's DoS defenses. Zero values pick safe defaults,
+// except RateRPS where <= 0 disables per-client rate limiting entirely
+// (tests, fully trusted networks).
+type Options struct {
+	// RateRPS is the sustained per-client request rate; RateBurst is the
+	// bucket size (<= 0: 10 seconds' worth of RateRPS).
+	RateRPS   float64
+	RateBurst int
+	// MaxInflight caps concurrent search queries. The store has one SQLite
+	// connection, so extra concurrency only queues; this bounds the queue.
+	MaxInflight int
+	// SearchTimeout bounds one request's total database time.
+	SearchTimeout time.Duration
+	// StatsTTL is how long stats and total-count responses are served from
+	// cache. Stats hit four aggregate queries; caching makes them O(1).
+	StatsTTL time.Duration
+}
 
 // CrawlerStatus describes the crawler for the stats endpoint. The sampler
 // fields are the ones to watch when discovery looks slow: Nodes is the pool
@@ -37,11 +72,50 @@ type Server struct {
 	crawler func() CrawlerStatus
 	logger  *log.Logger
 	mux     *http.ServeMux
+	opts    Options
+
+	limiter   *ipLimiter    // nil when rate limiting is disabled
+	searchSem chan struct{} // admission gate for search queries
+
+	// Cached /api/stats body and empty-query total, both refreshed at most
+	// once per StatsTTL. The mutexes double as single-flight: one request
+	// pays for the refresh while the rest wait for its result.
+	statsMu   sync.Mutex
+	statsBody []byte
+	statsAt   time.Time
+	countMu   sync.Mutex
+	countVal  int
+	countAt   time.Time
 }
 
 // New builds the HTTP handler. crawlerStatus may be nil.
-func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger) *Server {
-	s := &Server{st: st, crawler: crawlerStatus, logger: logger}
+func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger, opts Options) *Server {
+	if logger == nil {
+		logger = log.Default()
+	}
+	if opts.MaxInflight <= 0 {
+		opts.MaxInflight = defaultMaxInflight
+	}
+	if opts.SearchTimeout <= 0 {
+		opts.SearchTimeout = defaultSearchTimeout
+	}
+	if opts.StatsTTL <= 0 {
+		opts.StatsTTL = defaultStatsTTL
+	}
+	s := &Server{
+		st:        st,
+		crawler:   crawlerStatus,
+		logger:    logger,
+		opts:      opts,
+		searchSem: make(chan struct{}, opts.MaxInflight),
+	}
+	if opts.RateRPS > 0 {
+		burst := opts.RateBurst
+		if burst <= 0 {
+			burst = int(opts.RateRPS*10) + 1
+		}
+		s.limiter = newIPLimiter(opts.RateRPS, burst)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
@@ -50,7 +124,9 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	return s
 }
 
-// Handler returns the root handler with CORS/OPTIONS support.
+// Handler returns the root handler with CORS/OPTIONS support and per-client
+// rate limiting. The health check is exempt so monitoring and the deploy
+// script never get throttled behind a flood.
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -58,6 +134,11 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if s.limiter != nil && r.URL.Path != "/api/healthz" && !s.limiter.allow(clientKey(r)) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
 		s.mux.ServeHTTP(w, r)
@@ -75,10 +156,7 @@ type resultItem struct {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	if len(q) > maxQueryLen {
-		q = q[:maxQueryLen]
-	}
+	q := truncateUTF8(r.URL.Query().Get("q"), maxQueryLen)
 	page := atoiDefault(r.URL.Query().Get("page"), 1)
 	if page < 1 {
 		page = 1
@@ -90,10 +168,51 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
 	}
+	if (page-1)*pageSize > maxOffset {
+		page = maxOffset/pageSize + 1
+	}
 
-	items, total, err := s.st.Search(q, page, pageSize)
+	// Admission gate: the store serializes queries on one connection, so
+	// when all slots are busy piling on more requests only grows the queue.
+	// Wait briefly for a slot, then shed load instead of stacking up.
+	select {
+	case s.searchSem <- struct{}{}:
+		defer func() { <-s.searchSem }()
+	case <-r.Context().Done():
+		return
+	case <-time.After(admissionWait):
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusServiceUnavailable, "server busy")
+		return
+	}
+
+	// The context bounds database time and dies with the client connection,
+	// so queries for hung-up clients stop consuming the SQLite handle.
+	ctx, cancel := context.WithTimeout(r.Context(), s.opts.SearchTimeout)
+	defer cancel()
+
+	var (
+		items []store.Torrent
+		total int
+		err   error
+	)
+	if strings.TrimSpace(q) == "" {
+		// The landing page. Latest walks the created_at index instead of
+		// counting matches, and the total comes from the shared cache.
+		items, err = s.st.Latest(ctx, page, pageSize)
+		if err == nil {
+			total, err = s.cachedCount(ctx)
+		}
+	} else {
+		items, total, err = s.st.Search(ctx, q, page, pageSize)
+	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "search failed")
+		if ctx.Err() != nil {
+			w.Header().Set("Retry-After", "5")
+			writeError(w, http.StatusServiceUnavailable, "search timed out")
+		} else {
+			writeError(w, http.StatusInternalServerError, "search failed")
+		}
 		s.logger.Printf("api: search: %v", err)
 		return
 	}
@@ -117,23 +236,54 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// cachedCount returns the total torrent count, at most StatsTTL stale.
+// COUNT(*) walks a full index, so the landing page must not pay for it per
+// request. The lock is held across the query on purpose: it makes concurrent
+// misses single-flight.
+func (s *Server) cachedCount(ctx context.Context) (int, error) {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	if !s.countAt.IsZero() && time.Since(s.countAt) < s.opts.StatsTTL {
+		return s.countVal, nil
+	}
+	n, err := s.st.Count(ctx)
+	if err != nil {
+		return 0, err
+	}
+	s.countVal, s.countAt = n, time.Now()
+	return n, nil
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	total, err := s.st.Count()
+	// Single-flight with a TTL: stats aggregate four queries (two of them
+	// full scans), so one refresh per TTL serves everyone. The lock being
+	// held across the refresh is what keeps a stats flood down to one
+	// query stream.
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if s.statsBody != nil && time.Since(s.statsAt) < s.opts.StatsTTL {
+		writeRawJSON(w, http.StatusOK, s.statsBody)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.opts.SearchTimeout)
+	defer cancel()
+
+	total, err := s.st.Count(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "stats failed")
 		return
 	}
-	counters, err := s.st.Stats()
+	counters, err := s.st.Stats(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "stats failed")
 		return
 	}
-	blocked, err := s.st.BlockedCount()
+	blocked, err := s.st.BlockedCount(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "stats failed")
 		return
 	}
-	pending, err := s.st.PendingReviewCount()
+	pending, err := s.st.PendingReviewCount(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "stats failed")
 		return
@@ -164,7 +314,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()
 	}
-	writeJSON(w, http.StatusOK, resp)
+	body, err := json.Marshal(resp)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stats failed")
+		return
+	}
+	s.statsBody, s.statsAt = body, time.Now()
+	writeRawJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -182,10 +338,27 @@ func atoiDefault(s string, def int) int {
 	return def
 }
 
+// truncateUTF8 cuts s to at most n bytes without splitting a multi-byte rune.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+func writeRawJSON(w http.ResponseWriter, code int, body []byte) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	w.Write(body)
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {
