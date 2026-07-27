@@ -27,7 +27,10 @@ export default function SearchBox({ initialQuery = "", large = false }: SearchBo
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜索磁力链接 / 资源名称…"
           autoFocus={large}
-          className={`flex-1 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 placeholder-zinc-500 outline-none focus:border-emerald-500 ${
+          // min-w-0 lets the input shrink past its intrinsic size; without it
+          // the row overflows narrow viewports and pushes the submit button
+          // off-screen.
+          className={`min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 placeholder-zinc-500 outline-none focus:border-emerald-500 ${
             large ? "px-5 py-3.5 text-lg" : "px-4 py-2 text-sm"
           }`}
         />

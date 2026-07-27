@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { SearchResult } from "@/lib/api";
 import {
   commonDirPrefix,
+  formatCount,
   formatRelativeTime,
   formatSize,
   shortenDir,
@@ -16,6 +17,11 @@ export default function ResultCard({ result }: { result: SearchResult }) {
   const [expanded, setExpanded] = useState(false);
   const files = result.files ?? [];
   const shownFiles = files.slice(0, MAX_FILES_SHOWN);
+  // The crawler stores at most 50 file entries but records the real count, so
+  // count what's hidden against file_count — otherwise a 3136-file torrent
+  // claims only 40 files are missing.
+  const totalFiles = Math.max(result.file_count ?? 0, files.length);
+  const hiddenFiles = totalFiles - shownFiles.length;
   // Computed over every file, not just the shown ones, so the prefix doesn't
   // shift when the "+N more" tail is hidden.
   const root = commonDirPrefix(files.map((f) => f.path));
@@ -30,17 +36,18 @@ export default function ResultCard({ result }: { result: SearchResult }) {
         >
           {/* Release names carry their resolution, codec and group at the very
               end, so clamp to two lines rather than truncating to one — and
-              drop the clamp entirely once the card is open. */}
+              drop the clamp entirely once the card is open. Phone lines hold
+              far fewer characters, so they get a third line to compensate. */}
           <h3
             className={`text-sm font-medium wrap-anywhere text-emerald-400 hover:text-emerald-300 sm:text-base ${
-              expanded ? "" : "line-clamp-2"
+              expanded ? "" : "line-clamp-3 sm:line-clamp-2"
             }`}
           >
             {result.name || "(未命名)"}
           </h3>
           <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
             <span>{formatSize(result.total_size)}</span>
-            <span>{result.file_count ?? files.length} 个文件</span>
+            <span>{formatCount(totalFiles)} 个文件</span>
             <span>收录于 {formatRelativeTime(result.created_at)}</span>
           </p>
         </button>
@@ -86,9 +93,9 @@ export default function ResultCard({ result }: { result: SearchResult }) {
                     </li>
                   );
                 })}
-                {files.length > MAX_FILES_SHOWN && (
+                {hiddenFiles > 0 && (
                   <li className="pt-1 text-zinc-500">
-                    … 其余 {files.length - MAX_FILES_SHOWN} 个文件未显示
+                    … 其余 {formatCount(hiddenFiles)} 个文件未显示
                   </li>
                 )}
               </ul>
