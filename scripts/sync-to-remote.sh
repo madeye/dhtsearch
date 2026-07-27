@@ -56,7 +56,7 @@ DELTA="$TMP_DIR/delta.db"
 PRAGMA busy_timeout=5000;
 ATTACH '$DELTA' AS d;
 CREATE TABLE d.torrents AS
-  SELECT info_hash, name, total_size, file_count, files_json, created_at
+  SELECT info_hash, name, total_size, file_count, files, created_at
   FROM torrents WHERE created_at > $LAST;
 SQL
 
@@ -74,8 +74,8 @@ scp -q "$DELTA" "$DEPLOY_HOST:$REMOTE_TMP"
 ssh "$DEPLOY_HOST" "$SQLITE '$DEPLOY_DIR/data/dhtsearch.db' \"
 PRAGMA busy_timeout=10000;
 ATTACH '$REMOTE_TMP' AS d;
-INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files_json, created_at)
-  SELECT info_hash, name, total_size, file_count, files_json, created_at FROM d.torrents
+INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files, created_at)
+  SELECT info_hash, name, total_size, file_count, files, created_at FROM d.torrents
   WHERE info_hash NOT IN (SELECT info_hash FROM blocked);
 \" && rm -f '$REMOTE_TMP'"
 
