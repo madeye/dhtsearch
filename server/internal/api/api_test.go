@@ -12,6 +12,10 @@ import (
 )
 
 func testServer(t *testing.T) *httptest.Server {
+	return testServerOpts(t, Options{})
+}
+
+func testServerOpts(t *testing.T, opts Options) *httptest.Server {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -32,7 +36,7 @@ func testServer(t *testing.T) *httptest.Server {
 	}
 	srv := httptest.NewServer(New(st, func() CrawlerStatus {
 		return CrawlerStatus{Enabled: false, Seen: 42}
-	}, nil).Handler())
+	}, nil, opts).Handler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -89,6 +93,15 @@ func TestSearch(t *testing.T) {
 	m = getJSON(t, base+"/api/search?q=&page_size=1&page=2")
 	if len(m["results"].([]any)) != 1 || m["page"].(float64) != 2 {
 		t.Fatalf("pagination: %v", m)
+	}
+}
+
+// A huge page number must not translate into a huge OFFSET scan.
+func TestSearchClampsDeepPagination(t *testing.T) {
+	base := testServer(t).URL
+	m := getJSON(t, base+"/api/search?q=&page=99999999&page_size=100")
+	if got, want := m["page"].(float64), float64(maxOffset/100+1); got != want {
+		t.Fatalf("page = %v, want clamped to %v", got, want)
 	}
 }
 

@@ -57,6 +57,15 @@ func envInt64(key string, fallback int64) int64 {
 	return fallback
 }
 
+func envFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return fallback
+}
+
 func main() {
 	logger := log.Default()
 
@@ -78,6 +87,16 @@ func main() {
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
+
+	// API DoS defenses. See internal/api.Options for what each knob bounds.
+	rateRPS := flag.Float64("rate-rps", envFloat("RATE_LIMIT_RPS", 3),
+		"sustained API requests per second per client IP (0 = disable rate limiting)")
+	rateBurst := flag.Int("rate-burst", envInt("RATE_LIMIT_BURST", 30),
+		"rate limit burst size per client IP")
+	searchInflight := flag.Int("search-max-inflight", envInt("SEARCH_MAX_INFLIGHT", 16),
+		"max concurrent search queries before shedding load")
+	searchTimeout := flag.Duration("search-timeout", envDuration("SEARCH_TIMEOUT", 10*time.Second),
+		"database time budget for one search request")
 
 	// LLM moderation pass.
 	modEnabled := flag.Bool("moderate", envBool("MODERATION_ENABLED", true),
@@ -229,7 +248,9 @@ func main() {
 		}
 	}()
 
-	// HTTP API.
+	// HTTP API. The timeouts close slow-read and slow-write (slowloris)
+	// connections instead of letting each one pin a goroutine and a socket;
+	// MaxHeaderBytes stops oversized header floods from ballooning memory.
 	srv := &http.Server{
 		Addr: *addr,
 		Handler: api.New(st, func() api.CrawlerStatus {
@@ -243,8 +264,17 @@ func main() {
 				SampleErr: cs.SampleErr,
 				Harvested: cs.Harvested,
 			}
-		}, logger).Handler(),
+		}, logger, api.Options{
+			RateRPS:       *rateRPS,
+			RateBurst:     *rateBurst,
+			MaxInflight:   *searchInflight,
+			SearchTimeout: *searchTimeout,
+		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    16 << 10,
 	}
 	go func() {
 		<-ctx.Done()

@@ -4,6 +4,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -110,6 +111,14 @@ CREATE TABLE IF NOT EXISTS blocked (
 		ON torrents(created_at) WHERE reviewed_at = 0`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create unreviewed index: %w", err)
+	}
+	// Newest-first is the sort order of every search. Without this index an
+	// empty query — the landing page — sorts the whole table per request,
+	// and a keyword query cannot stop early after filling its page.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_torrents_created
+		ON torrents(created_at DESC)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create created_at index: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -244,15 +253,32 @@ func (s *Store) Upsert(t Torrent) error {
 	return err
 }
 
+// maxKeywords bounds how many query keywords turn into LIKE conditions.
+// Each keyword adds two LIKE evaluations per scanned row, so an unbounded
+// list lets one request multiply its own scan cost ~100x. Past a handful of
+// keywords extra terms only narrow an already tiny result set; the tail is
+// ignored.
+const maxKeywords = 8
+
+// selectCols is the projection shared by Search and Latest, decoded by
+// scanTorrents.
+const selectCols = `SELECT info_hash, IIF(clean_name <> '', clean_name, name),
+	total_size, file_count, files, created_at FROM torrents`
+
 // Search finds torrents whose name contains every space-separated keyword
 // of query (AND semantics), newest first. An empty query returns the latest
-// additions. page is 1-based; pageSize must be > 0.
-func (s *Store) Search(query string, page, pageSize int) (items []Torrent, total int, err error) {
+// additions. page is 1-based; pageSize must be > 0. ctx bounds the queries:
+// keyword matching is a full-table scan, so callers must be able to cut it
+// off when the client hangs up or a deadline passes.
+func (s *Store) Search(ctx context.Context, query string, page, pageSize int) (items []Torrent, total int, err error) {
 	if page < 1 {
 		page = 1
 	}
 	where, args := "", []interface{}{}
 	keywords := strings.Fields(query)
+	if len(keywords) > maxKeywords {
+		keywords = keywords[:maxKeywords]
+	}
 	if len(keywords) > 0 {
 		var conds []string
 		for _, kw := range keywords {
@@ -264,32 +290,53 @@ func (s *Store) Search(query string, page, pageSize int) (items []Torrent, total
 		}
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
-	if err = s.db.QueryRow(`SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := `SELECT info_hash, IIF(clean_name <> '', clean_name, name), total_size, file_count, files, created_at
-	      FROM torrents` + where + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
-	rows, err := s.db.Query(q, append(args, pageSize, (page-1)*pageSize)...)
+	q := selectCols + where + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	rows, err := s.db.QueryContext(ctx, q, append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
 		return nil, 0, err
 	}
+	items, err = scanTorrents(rows)
+	return items, total, err
+}
+
+// Latest returns a page of the newest torrents without counting the table.
+// It walks the created_at index, so its cost is O(pageSize + offset) — the
+// cheap path the landing page should take instead of Search("").
+func (s *Store) Latest(ctx context.Context, page, pageSize int) ([]Torrent, error) {
+	if page < 1 {
+		page = 1
+	}
+	rows, err := s.db.QueryContext(ctx,
+		selectCols+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, err
+	}
+	return scanTorrents(rows)
+}
+
+// scanTorrents drains rows from a selectCols query, decompressing each file
+// list. It always closes rows.
+func scanTorrents(rows *sql.Rows) (items []Torrent, err error) {
 	defer rows.Close()
 	for rows.Next() {
 		var t Torrent
 		var fb []byte
 		if err := rows.Scan(&t.InfoHash, &t.Name, &t.TotalSize, &t.FileCount, &fb, &t.CreatedAt); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		fj, err := decompressFiles(fb)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		if err := json.Unmarshal(fj, &t.Files); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		items = append(items, t)
 	}
-	return items, total, rows.Err()
+	return items, rows.Err()
 }
 
 // Unreviewed returns up to limit torrents the moderation pass has not seen
@@ -409,16 +456,16 @@ func (s *Store) Block(hashes, names []string, reason string, ts int64) (int64, e
 }
 
 // BlockedCount returns the number of moderation-rejected infohashes.
-func (s *Store) BlockedCount() (int, error) {
+func (s *Store) BlockedCount(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM blocked`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM blocked`).Scan(&n)
 	return n, err
 }
 
 // PendingReviewCount returns how many stored torrents await moderation.
-func (s *Store) PendingReviewCount() (int, error) {
+func (s *Store) PendingReviewCount(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM torrents WHERE reviewed_at = 0`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents WHERE reviewed_at = 0`).Scan(&n)
 	return n, err
 }
 
@@ -436,8 +483,8 @@ func (s *Store) IncrStat(key string, delta int64) error {
 }
 
 // Stats returns all pipeline counters.
-func (s *Store) Stats() (map[string]int64, error) {
-	rows, err := s.db.Query(`SELECT key, value FROM stats`)
+func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM stats`)
 	if err != nil {
 		return nil, err
 	}
@@ -455,9 +502,9 @@ func (s *Store) Stats() (map[string]int64, error) {
 }
 
 // Count returns the number of stored torrents.
-func (s *Store) Count() (int, error) {
+func (s *Store) Count(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM torrents`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents`).Scan(&n)
 	return n, err
 }
 

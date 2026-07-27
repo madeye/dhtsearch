@@ -1,8 +1,29 @@
 // API client for the DHTSearch Go backend.
 // Base URL is configurable via NEXT_PUBLIC_API_BASE.
 
+import { headers } from "next/headers";
+
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
+
+// Forward the caller's identity on server-side API requests. The Go backend
+// rate-limits per client IP; without these headers every SSR fetch would
+// arrive from the Next server's own address, so one abusive visitor could
+// exhaust the shared bucket for everyone.
+async function clientIPHeaders(): Promise<Record<string, string>> {
+  try {
+    const h = await headers();
+    const out: Record<string, string> = {};
+    const xff = h.get("x-forwarded-for");
+    if (xff) out["x-forwarded-for"] = xff;
+    const realIP = h.get("x-real-ip");
+    if (realIP) out["x-real-ip"] = realIP;
+    return out;
+  } catch {
+    // Outside a request scope (e.g. build time) there is nothing to forward.
+    return {};
+  }
+}
 
 export interface TorrentFile {
   path: string;
@@ -47,7 +68,14 @@ export async function fetchSearch(
   });
   const res = await fetch(`${API_BASE}/api/search?${params.toString()}`, {
     cache: "no-store",
+    headers: await clientIPHeaders(),
   });
+  if (res.status === 429) {
+    throw new Error("请求过于频繁，请稍后重试");
+  }
+  if (res.status === 503) {
+    throw new Error("服务器繁忙，请稍后重试");
+  }
   if (!res.ok) {
     throw new Error(`search API returned ${res.status}`);
   }
@@ -56,7 +84,10 @@ export async function fetchSearch(
 
 export async function fetchStats(): Promise<StatsResponse | null> {
   try {
-    const res = await fetch(`${API_BASE}/api/stats`, { cache: "no-store" });
+    const res = await fetch(`${API_BASE}/api/stats`, {
+      cache: "no-store",
+      headers: await clientIPHeaders(),
+    });
     if (!res.ok) return null;
     return (await res.json()) as StatsResponse;
   } catch {

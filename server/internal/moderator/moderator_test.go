@@ -115,7 +115,7 @@ func TestSweepRemovesAdultAndSpamKeepsOK(t *testing.T) {
 		t.Fatalf("summary = %+v", s)
 	}
 
-	items, total, err := st.Search("", 1, 10)
+	items, total, err := st.Search(t.Context(), "", 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestReviewedRowsAreNotReclassified(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != first {
 		t.Fatalf("second sweep made %d extra API calls, want 0", got-first)
 	}
-	if n, _ := st.PendingReviewCount(); n != 0 {
+	if n, _ := st.PendingReviewCount(t.Context()); n != 0 {
 		t.Fatalf("pending = %d, want 0", n)
 	}
 }
@@ -165,10 +165,10 @@ func TestBlockedTorrentIsNotReAdded(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, total, _ := st.Search("", 1, 10); total != 0 {
+	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 0 {
 		t.Fatalf("blocked infohash was re-added (total=%d)", total)
 	}
-	if n, _ := st.BlockedCount(); n != 1 {
+	if n, _ := st.BlockedCount(t.Context()); n != 1 {
 		t.Fatalf("blocked count = %d, want 1", n)
 	}
 }
@@ -186,7 +186,7 @@ func TestDryRunDeletesNothing(t *testing.T) {
 	if s.Adult != 1 || s.Deleted != 0 {
 		t.Fatalf("summary = %+v, want Adult=1 Deleted=0", s)
 	}
-	if _, total, _ := st.Search("", 1, 10); total != 1 {
+	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 1 {
 		t.Fatalf("dry run deleted rows (total=%d)", total)
 	}
 }
@@ -203,10 +203,10 @@ func TestAPIErrorLeavesRowsUnreviewed(t *testing.T) {
 	if _, err := newMod(t, st, srv.URL, nil).SweepOnce(context.Background()); err == nil {
 		t.Fatal("expected error from 401")
 	}
-	if n, _ := st.PendingReviewCount(); n != 1 {
+	if n, _ := st.PendingReviewCount(t.Context()); n != 1 {
 		t.Fatalf("pending = %d, want 1 (row must be retried)", n)
 	}
-	if _, total, _ := st.Search("", 1, 10); total != 1 {
+	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 1 {
 		t.Fatalf("row deleted on API error (total=%d)", total)
 	}
 }
@@ -257,7 +257,7 @@ func TestUnknownAndMissingLabelsDefaultToOK(t *testing.T) {
 	if s.Deleted != 0 {
 		t.Fatalf("deleted %d rows on malformed verdicts, want 0", s.Deleted)
 	}
-	if _, total, _ := st.Search("", 1, 10); total != 3 {
+	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 3 {
 		t.Fatalf("total = %d, want 3", total)
 	}
 }
