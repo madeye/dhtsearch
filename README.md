@@ -26,7 +26,7 @@
       ▼
 ┌──────────────────┐   命中    ┌────────────────────┐
 │ LLM 审核          │─────────►│ 删除 + 写入 blocked │
-│ (DeepSeek V4 Flash)│          └────────────────────┘
+│ (OpenRouter 免费模型)│         └────────────────────┘
 └──────────────────┘
 ```
 
@@ -90,12 +90,12 @@ LLM 审核相关（见下文「LLM 二次审核」）：
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | 无 | **必填**，未设置则审核不启动 |
-| `OPENAI_BASE_URL` | `https://api.deepseek.com/v1` | 任意 OpenAI 兼容端点 |
-| `OPENAI_MODEL` | `deepseek-v4-flash` | 审核模型 |
+| `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | 任意 OpenAI 兼容端点 |
+| `OPENAI_MODEL` | `inclusionai/ling-3.0-flash:free` | 审核模型（`:free` 后缀为 OpenRouter 免费模型） |
 | `MODERATION_ENABLED` | `true` | 总开关 |
 | `MODERATION_INTERVAL` | `1h` | 审核周期 |
-| `MODERATION_BATCH_SIZE` | `50` | 每次请求送审的标题数 |
-| `MODERATION_MAX_BATCHES` | `40` | 每轮最多几批（0 = 不限），用于封顶开销 |
+| `MODERATION_BATCH_SIZE` | `100` | 每次请求送审的标题数 |
+| `MODERATION_MAX_BATCHES` | `20` | 每轮最多几批（0 = 不限），用于封顶开销 |
 | `MODERATION_DRY_RUN` | `false` | 只打日志不删除 |
 | `MODERATION_TRIM_TITLES` | `true` | 顺带清理标题里的广告文字 |
 
