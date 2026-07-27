@@ -84,7 +84,7 @@ func main() {
 		"enable the periodic LLM moderation pass (requires OPENAI_API_KEY)")
 	modBaseURL := flag.String("moderate-base-url", envDefault("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
 		"OpenAI-compatible API base URL")
-	modModel := flag.String("moderate-model", envDefault("OPENAI_MODEL", "inclusionai/ling-3.0-flash:free"),
+	modModel := flag.String("moderate-model", envDefault("OPENAI_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"),
 		"chat model used for moderation")
 	modInterval := flag.Duration("moderate-interval", envDuration("MODERATION_INTERVAL", time.Hour),
 		"how often to run the moderation pass")

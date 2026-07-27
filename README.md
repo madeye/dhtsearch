@@ -91,7 +91,7 @@ LLM 审核相关（见下文「LLM 二次审核」）：
 | --- | --- | --- |
 | `OPENAI_API_KEY` | 无 | **必填**，未设置则审核不启动 |
 | `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | 任意 OpenAI 兼容端点 |
-| `OPENAI_MODEL` | `inclusionai/ling-3.0-flash:free` | 审核模型（`:free` 后缀为 OpenRouter 免费模型） |
+| `OPENAI_MODEL` | `nvidia/nemotron-3-super-120b-a12b:free` | 审核模型（`:free` 后缀为 OpenRouter 免费模型） |
 | `MODERATION_ENABLED` | `true` | 总开关 |
 | `MODERATION_INTERVAL` | `1h` | 审核周期 |
 | `MODERATION_BATCH_SIZE` | `100` | 每次请求送审的标题数 |
