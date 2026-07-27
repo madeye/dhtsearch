@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -178,6 +181,108 @@ func TestOpenMigratesPreModerationDB(t *testing.T) {
 		t.Fatalf("reopen migrated db: %v", err)
 	}
 	s2.Close()
+}
+
+// A database from before compression stores the file list as plain JSON in a
+// files_json column. Open must move it into the compressed files blob, drop
+// the old column, and keep every file list readable.
+func TestOpenMigratesFilesJSONToCompressedBlob(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file list long enough that zstd beats the plain text.
+	var files []filter.File
+	for i := 0; i < 200; i++ {
+		files = append(files, filter.File{
+			Path: fmt.Sprintf("Some.Show.S01E%03d.1080p.WEB-DL.x265/episode.%03d.mkv", i, i),
+			Size: int64(i) << 20,
+		})
+	}
+	fj, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE torrents (
+		info_hash  TEXT PRIMARY KEY,
+		name       TEXT NOT NULL,
+		total_size INTEGER NOT NULL,
+		file_count INTEGER NOT NULL,
+		files_json TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO torrents VALUES ('aa', 'Some Show S01', 42, 200, ?, 100)`,
+		string(fj)); err != nil {
+		t.Fatal(err)
+	}
+	// A second row whose tiny list is cheaper kept raw.
+	if _, err := db.Exec(`INSERT INTO torrents VALUES ('bb', 'One File', 7, 1, '[]', 200)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on files_json db: %v", err)
+	}
+	defer s.Close()
+
+	var hasOld int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('torrents') WHERE name = 'files_json'`).Scan(&hasOld); err != nil {
+		t.Fatal(err)
+	}
+	if hasOld != 0 {
+		t.Fatal("files_json column still present after migration")
+	}
+
+	var blobLen int
+	if err := s.db.QueryRow(
+		`SELECT length(files) FROM torrents WHERE info_hash = 'aa'`).Scan(&blobLen); err != nil {
+		t.Fatal(err)
+	}
+	if blobLen == 0 || blobLen >= len(fj) {
+		t.Fatalf("stored blob is %d bytes, want (0, %d)", blobLen, len(fj))
+	}
+
+	items, total, err := s.Search("", 1, 10)
+	if err != nil || total != 2 {
+		t.Fatalf("search after migration: total=%d err=%v", total, err)
+	}
+	// Newest first, so items[1] is the big row.
+	got := items[1].Files
+	if len(got) != len(files) || got[0] != files[0] || got[199] != files[199] {
+		t.Fatalf("file list did not survive migration: got %d files", len(got))
+	}
+	if len(items[0].Files) != 0 {
+		t.Fatalf("empty file list did not survive migration: %+v", items[0].Files)
+	}
+}
+
+func TestCompressFilesRoundTrip(t *testing.T) {
+	// Too small to compress: stored verbatim.
+	small := []byte(`[{"path":"a.mkv","size":1}]`)
+	if got := compressFiles(small); !bytes.Equal(got, small) {
+		t.Fatalf("small payload was not kept raw: %x", got)
+	}
+	// Large and repetitive: stored compressed, and round-trips.
+	big := bytes.Repeat([]byte(`{"path":"show/episode.mkv","size":123456},`), 100)
+	c := compressFiles(big)
+	if !bytes.HasPrefix(c, zstdMagic) {
+		t.Fatal("large payload was not compressed")
+	}
+	if len(c) >= len(big) {
+		t.Fatalf("compressed %d bytes to %d, no gain", len(big), len(c))
+	}
+	for _, in := range [][]byte{small, big} {
+		out, err := decompressFiles(compressFiles(in))
+		if err != nil || !bytes.Equal(out, in) {
+			t.Fatalf("round-trip failed: err=%v", err)
+		}
+	}
 }
 
 func TestSetCleanNamesReplacesDisplayNameOnly(t *testing.T) {
