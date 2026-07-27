@@ -3,11 +3,13 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
 
 	"dhtsearch/server/internal/filter"
@@ -54,7 +56,9 @@ CREATE TABLE IF NOT EXISTS torrents (
 	name        TEXT NOT NULL,
 	total_size  INTEGER NOT NULL,
 	file_count  INTEGER NOT NULL,
-	files_json  TEXT NOT NULL,
+	-- JSON file list, zstd-compressed when that is smaller than the plain
+	-- text. See compressFiles/decompressFiles.
+	files       BLOB NOT NULL,
 	created_at  INTEGER NOT NULL,
 	reviewed_at INTEGER NOT NULL DEFAULT 0,
 	-- Title with promotional junk stripped by the moderation pass. Empty means
@@ -93,6 +97,12 @@ CREATE TABLE IF NOT EXISTS blocked (
 			return nil, fmt.Errorf("migrate %s: %w", m.name, err)
 		}
 	}
+	// Migrate the uncompressed files_json TEXT column (databases created
+	// before compression) into the files BLOB column.
+	if err := migrateFilesBlob(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate files_json to files: %w", err)
+	}
 	// Partial index: only unreviewed rows are indexed, so it stays tiny and the
 	// moderation sweep never scans the full table. Created after the migration
 	// above so the column it filters on is guaranteed to exist.
@@ -104,6 +114,121 @@ CREATE TABLE IF NOT EXISTS blocked (
 	return &Store{db: db}, nil
 }
 
+// Shared zstd coders. EncodeAll/DecodeAll on a nil-stream coder are safe for
+// concurrent use. Options are static and valid, so construction cannot fail.
+var (
+	zenc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+	zdec, _ = zstd.NewReader(nil)
+)
+
+// zstdMagic starts every zstd frame (RFC 8878). Raw JSON starts with '[', so
+// the first bytes of a files blob say unambiguously whether it is compressed.
+var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
+
+// compressFiles returns raw zstd-compressed, or raw itself when compression
+// does not pay (small file lists, where the frame overhead wins).
+func compressFiles(raw []byte) []byte {
+	c := zenc.EncodeAll(raw, make([]byte, 0, len(raw)))
+	if len(c) >= len(raw) {
+		return raw
+	}
+	return c
+}
+
+// decompressFiles reverses compressFiles.
+func decompressFiles(b []byte) ([]byte, error) {
+	if !bytes.HasPrefix(b, zstdMagic) {
+		return b, nil
+	}
+	return zdec.DecodeAll(b, nil)
+}
+
+// migrateFilesBlob rewrites databases created when the file list was stored
+// as plain JSON in files_json: it backfills the compressed files column,
+// drops files_json, and vacuums to hand the freed pages back to the OS. It is
+// crash-safe: every batch commits separately, and until the DROP COLUMN at
+// the end both columns coexist, so an interrupted run resumes where it left
+// off on the next Open. No-op unless files_json exists.
+func migrateFilesBlob(db *sql.DB) error {
+	var hasOld int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('torrents') WHERE name = 'files_json'`).Scan(&hasOld); err != nil {
+		return err
+	}
+	if hasOld == 0 {
+		return nil
+	}
+	// The files column cannot be in the CREATE TABLE path here (the table
+	// already existed), so add it. x'' marks "not yet backfilled": a real
+	// blob is never empty because even an empty file list serializes to "[]".
+	if _, err := db.Exec(`ALTER TABLE torrents ADD COLUMN files BLOB NOT NULL DEFAULT x''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	// Backfill in bounded batches so memory stays flat on large databases.
+	for {
+		rows, err := db.Query(
+			`SELECT info_hash, files_json FROM torrents WHERE length(files) = 0 LIMIT 1000`)
+		if err != nil {
+			return err
+		}
+		type pending struct {
+			hash string
+			blob []byte
+		}
+		var batch []pending
+		for rows.Next() {
+			var hash, fj string
+			if err := rows.Scan(&hash, &fj); err != nil {
+				rows.Close()
+				return err
+			}
+			if fj == "" {
+				// Defensive: an empty string would neither unmarshal nor
+				// leave the "not yet backfilled" state. Normalize.
+				fj = "[]"
+			}
+			batch = append(batch, pending{hash, compressFiles([]byte(fj))})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(batch) == 0 {
+			break
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		up, err := tx.Prepare(`UPDATE torrents SET files = ? WHERE info_hash = ?`)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		for _, p := range batch {
+			if _, err := up.Exec(p.blob, p.hash); err != nil {
+				up.Close()
+				tx.Rollback()
+				return err
+			}
+		}
+		up.Close()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`ALTER TABLE torrents DROP COLUMN files_json`); err != nil {
+		return err
+	}
+	// Return the freed pages to the filesystem. Best-effort: VACUUM needs
+	// scratch space on disk, and a database that keeps its old size is still
+	// fully functional, so a failure here must not block startup.
+	db.Exec(`VACUUM`)
+	return nil
+}
+
 // Upsert inserts a torrent, ignoring duplicates (same info hash) and
 // infohashes previously rejected by moderation.
 func (s *Store) Upsert(t Torrent) error {
@@ -112,10 +237,10 @@ func (s *Store) Upsert(t Torrent) error {
 		return err
 	}
 	_, err = s.db.Exec(
-		`INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files_json, created_at)
+		`INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files, created_at)
 		 SELECT ?, ?, ?, ?, ?, ?
 		 WHERE NOT EXISTS (SELECT 1 FROM blocked WHERE info_hash = ?)`,
-		t.InfoHash, t.Name, t.TotalSize, t.FileCount, string(fj), t.CreatedAt, t.InfoHash)
+		t.InfoHash, t.Name, t.TotalSize, t.FileCount, compressFiles(fj), t.CreatedAt, t.InfoHash)
 	return err
 }
 
@@ -142,7 +267,7 @@ func (s *Store) Search(query string, page, pageSize int) (items []Torrent, total
 	if err = s.db.QueryRow(`SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := `SELECT info_hash, IIF(clean_name <> '', clean_name, name), total_size, file_count, files_json, created_at
+	q := `SELECT info_hash, IIF(clean_name <> '', clean_name, name), total_size, file_count, files, created_at
 	      FROM torrents` + where + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows, err := s.db.Query(q, append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
@@ -151,11 +276,15 @@ func (s *Store) Search(query string, page, pageSize int) (items []Torrent, total
 	defer rows.Close()
 	for rows.Next() {
 		var t Torrent
-		var fj string
-		if err := rows.Scan(&t.InfoHash, &t.Name, &t.TotalSize, &t.FileCount, &fj, &t.CreatedAt); err != nil {
+		var fb []byte
+		if err := rows.Scan(&t.InfoHash, &t.Name, &t.TotalSize, &t.FileCount, &fb, &t.CreatedAt); err != nil {
 			return nil, 0, err
 		}
-		if err := json.Unmarshal([]byte(fj), &t.Files); err != nil {
+		fj, err := decompressFiles(fb)
+		if err != nil {
+			return nil, 0, err
+		}
+		if err := json.Unmarshal(fj, &t.Files); err != nil {
 			return nil, 0, err
 		}
 		items = append(items, t)
