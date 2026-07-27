@@ -132,6 +132,18 @@ npm run dev                  # 开发
 
 前端 SSR 请求会把入站的 `X-Forwarded-For` / `X-Real-IP` 透传给后端，限流按真实访客计——注意反向代理需设置这两个头（nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`）。
 
+**站点在 Cloudflare 后面时必须多配一步**：此时 nginx 的 `$remote_addr` 是 CF 边缘节点的公网 IP，会被后端当成「真实客户端」，限流就打在了被众多访客共享的 CF 节点上。用 realip 模块从 `CF-Connecting-IP` 还原访客 IP（只信任 [Cloudflare 官方网段](https://www.cloudflare.com/ips/)）：
+
+```nginx
+# /etc/nginx/conf.d/cloudflare-real-ip.conf
+# 对 cloudflare.com/ips-v4 与 ips-v6 里的每个网段各写一行：
+set_real_ip_from 173.245.48.0/20;
+# ...
+real_ip_header CF-Connecting-IP;
+```
+
+直连绕过 CF 的流量不在信任网段内，`CF-Connecting-IP` 伪造无效，仍按对端真实地址限流。CF 网段偶有更新，建议定期比对官方列表。
+
 ## 过滤策略
 
 ### 第一道：入库前的静态过滤
