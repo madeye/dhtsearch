@@ -39,6 +39,7 @@ type Config struct {
 	MaxBatches int           // batches per sweep; 0 = unlimited
 	Timeout    time.Duration // per-request timeout
 	DryRun     bool          // classify and log, but delete nothing
+	TrimTitles bool          // also strip advertising from titles
 	Logger     *log.Logger
 	HTTPClient *http.Client // optional; for tests
 }
@@ -56,6 +57,7 @@ type Summary struct {
 	Adult    int
 	Spam     int
 	Deleted  int64
+	Trimmed  int64
 }
 
 // New validates cfg and builds a Moderator.
@@ -90,8 +92,8 @@ func New(st *store.Store, cfg Config) (*Moderator, error) {
 
 // Run sweeps every Interval until ctx is cancelled. It blocks.
 func (m *Moderator) Run(ctx context.Context) {
-	m.cfg.Logger.Printf("moderator: enabled (model=%s interval=%s batch=%d dry-run=%v)",
-		m.cfg.Model, m.cfg.Interval, m.cfg.BatchSize, m.cfg.DryRun)
+	m.cfg.Logger.Printf("moderator: enabled (model=%s interval=%s batch=%d dry-run=%v trim-titles=%v)",
+		m.cfg.Model, m.cfg.Interval, m.cfg.BatchSize, m.cfg.DryRun, m.cfg.TrimTitles)
 	t := time.NewTicker(m.cfg.Interval)
 	defer t.Stop()
 	for {
@@ -109,8 +111,8 @@ func (m *Moderator) Run(ctx context.Context) {
 				continue
 			}
 			if s.Reviewed > 0 {
-				m.cfg.Logger.Printf("moderator: reviewed=%d adult=%d spam=%d deleted=%d",
-					s.Reviewed, s.Adult, s.Spam, s.Deleted)
+				m.cfg.Logger.Printf("moderator: reviewed=%d adult=%d spam=%d deleted=%d trimmed=%d",
+					s.Reviewed, s.Adult, s.Spam, s.Deleted, s.Trimmed)
 			}
 		}
 	}
@@ -133,6 +135,7 @@ func (m *Moderator) SweepOnce(ctx context.Context) (Summary, error) {
 		total.Adult += s.Adult
 		total.Spam += s.Spam
 		total.Deleted += s.Deleted
+		total.Trimmed += s.Trimmed
 		if err != nil {
 			return total, err
 		}
@@ -143,22 +146,38 @@ func (m *Moderator) SweepOnce(ctx context.Context) (Summary, error) {
 // reviewBatch classifies one batch and applies the verdicts.
 func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (Summary, error) {
 	var s Summary
-	labels, err := m.classify(ctx, cands)
+	verdicts, err := m.classify(ctx, cands)
 	if err != nil {
 		return s, err
 	}
 
 	now := time.Now().Unix()
 	var adultH, adultN, spamH, spamN []string
+	trims := map[string]string{}
 	for i, c := range cands {
-		switch labels[i] {
+		switch verdicts[i].label {
 		case labelAdult:
 			adultH, adultN = append(adultH, c.InfoHash), append(adultN, c.Name)
 		case labelSpam:
 			spamH, spamN = append(spamH, c.InfoHash), append(spamN, c.Name)
+		default:
+			// Only worth trimming titles that survive moderation.
+			if v := verdicts[i].clean; v != "" {
+				trims[c.InfoHash] = v
+			}
 		}
 	}
 	s.Reviewed, s.Adult, s.Spam = len(cands), len(adultH), len(spamH)
+
+	// Trims are logged before/after either way — that log is the audit trail
+	// for what the model rewrote.
+	raw := make(map[string]string, len(cands))
+	for _, c := range cands {
+		raw[c.InfoHash] = c.Name
+	}
+	for h, clean := range trims {
+		m.cfg.Logger.Printf("moderator: trim %s %q -> %q", h, raw[h], clean)
+	}
 
 	if m.cfg.DryRun {
 		for i, h := range adultH {
@@ -168,6 +187,12 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 			m.cfg.Logger.Printf("moderator: [dry-run] would remove spam %s %q", h, spamN[i])
 		}
 	} else {
+		n, err := m.st.SetCleanNames(trims)
+		if err != nil {
+			return s, fmt.Errorf("set clean names: %w", err)
+		}
+		s.Trimmed = n
+		m.st.IncrStat("llm_titles_trimmed", n)
 		for _, g := range []struct {
 			hashes, names []string
 			reason, stat  string
@@ -202,8 +227,23 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 	return s, nil
 }
 
-const systemPrompt = `You are a content-moderation classifier for a BitTorrent metadata index.
-You receive a numbered list of torrent listings. Assign each exactly one label:
+// systemPromptFor builds the instructions. The title-trimming half is left out
+// entirely when the feature is off, so it costs no tokens.
+func systemPromptFor(trim bool) string {
+	if trim {
+		return promptHead + "For each one, assign a label and return a cleaned-up title.\n" +
+			promptLabel + promptClean + promptTailTrim
+	}
+	return promptHead + "Assign each one a label.\n" + promptLabel + promptTail
+}
+
+const promptHead = `You are a content-moderation classifier for a BitTorrent metadata index.
+You receive a JSON array of torrent listings, each with "i" (its number),
+"title", "size" and "files". Judge only by "title"; "size" and "files" are
+context. `
+
+const promptLabel = `
+LABEL — assign each listing exactly one:
 
 - "adult": pornography or sexually explicit material (including JAV, hentai,
   camgirl/webcam rips, escort or sex-work advertising).
@@ -220,17 +260,64 @@ Rules:
 - Sex education, documentaries and mainstream films with sexual themes are "ok";
   reserve "adult" for material whose purpose is explicit sexual content.
 - When genuinely unsure, answer "ok".
+`
 
+const promptClean = `
+CLEAN — the same title with advertising removed. Copy the title and DELETE the
+promotional spans. Never reword, translate, reorder, re-space or re-punctuate
+anything you keep: the result must be the original title with characters removed
+and nothing else.
+
+Delete:
+- Site and forum banners, in any bracket style: 【高清剧集网发布 www.xxx.com】,
+  [ www.UsaBit.com ] -, (www.xxx.net), www.xxx.com@, 【xxx论坛】.
+- Bare URLs, domains and invite codes that advertise a site.
+- Solicitations: 地址发布页, 收藏不迷路, 关注我们, 更多资源请访问, 最新地址,
+  免费下载, "visit", "download more at", QQ/WeChat/Telegram handles and numbers.
+- Uploader ad tags appended to the end: [TGx], [EZTVx.to], -RARBG.com, [rartv].
+
+Keep everything that describes the release, even if it looks like noise:
+- Title, year, season/episode, resolution, source, codec, bit depth, HDR.
+- Audio format and channels, language and subtitle tags, file extension.
+- Release-group and fansub tags: -FraMeSToR, [Erai-raws], [ReinForce], -NTb.
+  These identify the release, they are not advertising.
+
+If a title has no advertising, return it unchanged. Never return an empty
+string, and never delete so much that the work is no longer identifiable.
+"clean" holds the title text ONLY — never append the size or the file count.
+`
+
+const promptTailTrim = `
+Respond with JSON only, no prose, in exactly this shape:
+{"verdicts":[{"i":1,"label":"ok","clean":"cleaned title"},{"i":2,"label":"adult","clean":"cleaned title"}]}
+Include exactly one entry for every input number.`
+
+const promptTail = `
 Respond with JSON only, no prose, in exactly this shape:
 {"verdicts":[{"i":1,"label":"ok"},{"i":2,"label":"adult"}]}
 Include exactly one entry for every input number.`
 
-// classify returns a label per candidate, aligned by index. Entries the model
+// verdict is the model's answer for one candidate. clean is empty unless the
+// model proposed a trimmed title that passed validation.
+type verdict struct {
+	label string
+	clean string
+}
+
+// classify returns a verdict per candidate, aligned by index. Entries the model
 // omits or labels unknown default to "ok" (fail-open: never delete on doubt).
-func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]string, error) {
-	var b strings.Builder
+func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]verdict, error) {
+	// The listing goes over as JSON so "title" is unambiguously delimited. With
+	// a "<title> [1.2GB, 3 files]" line the model intermittently copied the
+	// size suffix into the cleaned title, which validation then rejected.
+	items := make([]promptItem, len(cands))
 	for i, c := range cands {
-		fmt.Fprintf(&b, "%d. %s [%s, %d files]\n", i+1, sanitize(c.Name), humanSize(c.TotalSize), c.FileCount)
+		name, _ := promptName(c.Name)
+		items[i] = promptItem{I: i + 1, Title: name, Size: humanSize(c.TotalSize), Files: c.FileCount}
+	}
+	listing, err := json.Marshal(items)
+	if err != nil {
+		return nil, err
 	}
 
 	reqBody, err := json.Marshal(chatRequest{
@@ -238,8 +325,8 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]st
 		Temperature:    0,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: b.String()},
+			{Role: "system", Content: systemPromptFor(m.cfg.TrimTitles)},
+			{Role: "user", Content: string(listing)},
 		},
 	})
 	if err != nil {
@@ -251,9 +338,9 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]st
 		return nil, err
 	}
 
-	labels := make([]string, len(cands))
-	for i := range labels {
-		labels[i] = labelOK
+	out := make([]verdict, len(cands))
+	for i := range out {
+		out[i] = verdict{label: labelOK}
 	}
 	var parsed verdictResponse
 	if err := json.Unmarshal([]byte(stripFences(raw)), &parsed); err != nil {
@@ -265,12 +352,15 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]st
 		}
 		switch strings.ToLower(strings.TrimSpace(v.Label)) {
 		case labelAdult:
-			labels[v.I-1] = labelAdult
+			out[v.I-1].label = labelAdult
 		case labelSpam:
-			labels[v.I-1] = labelSpam
+			out[v.I-1].label = labelSpam
+		}
+		if m.cfg.TrimTitles {
+			out[v.I-1].clean = cleanTitle(cands[v.I-1].Name, v.Clean)
 		}
 	}
-	return labels, nil
+	return out, nil
 }
 
 // post sends one chat completion request, retrying on 429 and 5xx.
@@ -340,19 +430,85 @@ func stripFences(s string) string {
 	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "```"))
 }
 
-// sanitize keeps a title on one line and bounded in length so it cannot break
-// the numbered list or blow up the prompt.
+// promptNameCap bounds how much of a title reaches the model, so one absurd
+// name cannot blow up the prompt.
+const promptNameCap = 200
+
+// sanitize keeps a title on one line so it cannot break the numbered list.
 func sanitize(s string) string {
-	s = strings.Map(func(r rune) rune {
+	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\t' {
 			return ' '
 		}
 		return r
 	}, s)
-	if r := []rune(s); len(r) > 200 {
-		s = string(r[:200]) + "…"
+}
+
+// promptName renders a title for the prompt, reporting whether it had to be cut
+// short. A truncated title must never be trimmed: the model never saw the tail,
+// so applying its answer would silently delete the rest of the name.
+func promptName(s string) (text string, truncated bool) {
+	s = sanitize(s)
+	if r := []rune(s); len(r) > promptNameCap {
+		return string(r[:promptNameCap]) + "…", true
 	}
-	return s
+	return s, false
+}
+
+// Guards against a model that rewrites instead of trimming. A cleaned title
+// must keep at least this many runes, and this share of the original.
+const (
+	minCleanRunes = 4
+	minCleanRatio = 0.25
+)
+
+// cleanTitle validates a model-proposed title against the original and returns
+// the value to store, or "" when the proposal must be ignored.
+//
+// The model is told to only delete characters, so the proposal must remain a
+// subsequence of the original. That single check rejects rewrites,
+// translations, re-spacing and outright hallucination — anything that invents a
+// rune the original did not have, in the order it had it.
+func cleanTitle(raw, proposed string) string {
+	full, truncated := promptName(raw)
+	if truncated {
+		return ""
+	}
+	proposed = strings.Trim(collapseSpaces(proposed), " \t-_|")
+	if proposed == "" || proposed == full || proposed == collapseSpaces(full) {
+		return ""
+	}
+	rp, rf := []rune(proposed), []rune(full)
+	if len(rp) > len(rf) ||
+		len(rp) < minCleanRunes ||
+		float64(len(rp)) < minCleanRatio*float64(len(rf)) {
+		return ""
+	}
+	if !isSubsequence(rp, rf) {
+		return ""
+	}
+	return proposed
+}
+
+// isSubsequence reports whether sub can be obtained from of by deleting runes.
+func isSubsequence(sub, of []rune) bool {
+	j := 0
+	for _, c := range sub {
+		for j < len(of) && of[j] != c {
+			j++
+		}
+		if j == len(of) {
+			return false
+		}
+		j++
+	}
+	return true
+}
+
+// collapseSpaces squeezes runs of whitespace into a single space, tidying the
+// gap left where an advertising span was cut out.
+func collapseSpaces(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func humanSize(n int64) string {
@@ -390,9 +546,18 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
+// promptItem is one listing as presented to the model.
+type promptItem struct {
+	I     int    `json:"i"`
+	Title string `json:"title"`
+	Size  string `json:"size"`
+	Files int    `json:"files"`
+}
+
 type verdictResponse struct {
 	Verdicts []struct {
 		I     int    `json:"i"`
 		Label string `json:"label"`
+		Clean string `json:"clean"`
 	} `json:"verdicts"`
 }

@@ -94,6 +94,8 @@ func main() {
 		"max batches per moderation pass (0 = unlimited)")
 	modDryRun := flag.Bool("moderate-dry-run", envBool("MODERATION_DRY_RUN", false),
 		"log what moderation would delete without deleting it")
+	modTrim := flag.Bool("moderate-trim-titles", envBool("MODERATION_TRIM_TITLES", true),
+		"also strip advertising from torrent titles during the moderation pass")
 	flag.Parse()
 
 	filter.MinTotalSize = *minSize
@@ -195,6 +197,7 @@ func main() {
 				BatchSize:  *modBatch,
 				MaxBatches: *modMaxBatches,
 				DryRun:     *modDryRun,
+				TrimTitles: *modTrim,
 				Logger:     logger,
 			})
 			if err != nil {
