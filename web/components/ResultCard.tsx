@@ -2,7 +2,12 @@
 
 import { useState } from "react";
 import type { SearchResult } from "@/lib/api";
-import { formatRelativeTime, formatSize } from "@/lib/format";
+import {
+  commonDirPrefix,
+  formatRelativeTime,
+  formatSize,
+  shortenDir,
+} from "@/lib/format";
 import CopyMagnetButton from "./CopyMagnetButton";
 
 const MAX_FILES_SHOWN = 10;
@@ -11,6 +16,9 @@ export default function ResultCard({ result }: { result: SearchResult }) {
   const [expanded, setExpanded] = useState(false);
   const files = result.files ?? [];
   const shownFiles = files.slice(0, MAX_FILES_SHOWN);
+  // Computed over every file, not just the shown ones, so the prefix doesn't
+  // shift when the "+N more" tail is hidden.
+  const root = commonDirPrefix(files.map((f) => f.path));
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 transition-colors hover:border-zinc-700">
@@ -20,7 +28,14 @@ export default function ResultCard({ result }: { result: SearchResult }) {
           className="min-w-0 flex-1 text-left"
           title={result.name}
         >
-          <h3 className="truncate text-sm font-medium text-emerald-400 hover:text-emerald-300 sm:text-base">
+          {/* Release names carry their resolution, codec and group at the very
+              end, so clamp to two lines rather than truncating to one — and
+              drop the clamp entirely once the card is open. */}
+          <h3
+            className={`text-sm font-medium wrap-anywhere text-emerald-400 hover:text-emerald-300 sm:text-base ${
+              expanded ? "" : "line-clamp-2"
+            }`}
+          >
             {result.name || "(未命名)"}
           </h3>
           <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
@@ -35,23 +50,56 @@ export default function ResultCard({ result }: { result: SearchResult }) {
       {expanded && (
         <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
           {files.length > 0 ? (
-            <ul className="space-y-1 text-xs text-zinc-400">
-              {shownFiles.map((f, i) => (
-                <li key={i} className="flex items-baseline justify-between gap-3">
-                  <span className="min-w-0 truncate font-mono">{f.path}</span>
-                  <span className="shrink-0 text-zinc-500">{formatSize(f.size)}</span>
-                </li>
-              ))}
-              {files.length > MAX_FILES_SHOWN && (
-                <li className="pt-1 text-zinc-500">
-                  … 其余 {files.length - MAX_FILES_SHOWN} 个文件未显示
-                </li>
+            <>
+              {root && (
+                <p
+                  className="mb-2 line-clamp-2 border-b border-zinc-800/80 pb-2 font-mono text-[11px] wrap-anywhere text-zinc-500"
+                  title={root}
+                >
+                  📁 {root}
+                </p>
               )}
-            </ul>
+              <ul className="space-y-1.5 text-xs text-zinc-400">
+                {shownFiles.map((f, i) => {
+                  const rest = f.path.slice(root.length);
+                  const cut = rest.lastIndexOf("/");
+                  const dir = cut >= 0 ? rest.slice(0, cut + 1) : "";
+                  const name = cut >= 0 ? rest.slice(cut + 1) : rest;
+                  return (
+                    <li key={i} className="flex items-baseline justify-between gap-3">
+                      <span className="min-w-0 font-mono" title={f.path}>
+                        {/* The directory is context, so it may truncate; the
+                            file name is what tells two rows apart, so it wraps
+                            in full on its own line. */}
+                        {dir && (
+                          <span className="block truncate text-zinc-600">
+                            {shortenDir(dir)}
+                          </span>
+                        )}
+                        <span className="block wrap-anywhere text-zinc-300">
+                          {name}
+                        </span>
+                      </span>
+                      <span className="shrink-0 tabular-nums text-zinc-500">
+                        {formatSize(f.size)}
+                      </span>
+                    </li>
+                  );
+                })}
+                {files.length > MAX_FILES_SHOWN && (
+                  <li className="pt-1 text-zinc-500">
+                    … 其余 {files.length - MAX_FILES_SHOWN} 个文件未显示
+                  </li>
+                )}
+              </ul>
+            </>
           ) : (
             <p className="text-xs text-zinc-500">暂无文件列表信息</p>
           )}
-          <p className="mt-2 break-all font-mono text-[11px] leading-relaxed text-zinc-600">
+          <p
+            className="mt-3 line-clamp-2 border-t border-zinc-800/80 pt-2 font-mono text-[11px] leading-relaxed break-all text-zinc-600"
+            title={result.magnet}
+          >
             {result.magnet}
           </p>
         </div>

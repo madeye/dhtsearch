@@ -41,3 +41,42 @@ export function formatCount(n: number | undefined | null): string {
   if (n === undefined || n === null || !Number.isFinite(n)) return "-";
   return n.toLocaleString("zh-CN");
 }
+
+// Longest directory prefix (ending in "/") shared by every path.
+//
+// Torrents almost always wrap their contents in one top-level folder named
+// after the torrent itself. Rendering that prefix on every row pushes the only
+// distinguishing part — the file name — past the right edge, making unrelated
+// files look identical. Callers strip the prefix and show it once instead.
+export function commonDirPrefix(paths: string[]): string {
+  if (paths.length < 2) return "";
+  let prefix = paths[0].slice(0, paths[0].lastIndexOf("/") + 1);
+  for (const p of paths.slice(1)) {
+    while (prefix && !p.startsWith(prefix)) {
+      // Drop the trailing "/" then back up to the previous separator.
+      prefix = prefix.slice(0, prefix.lastIndexOf("/", prefix.length - 2) + 1);
+    }
+    if (!prefix) return "";
+  }
+  return prefix;
+}
+
+// Shorten a directory path from the left, e.g. "A.Very.Long.Release/Subs/" ->
+// ".../Subs/". The deepest segment says what the file is for, while the release
+// folder at the front is both the longest and the least informative, so keep
+// trailing segments while they fit in the budget and elide the rest. A single
+// trailing segment is kept whatever its length — CSS truncates the overflow.
+export function shortenDir(dir: string, maxChars = 48): string {
+  if (dir.length <= maxChars) return dir;
+  const segments = dir.split("/").filter(Boolean);
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const cost = segments[i].length + 1;
+    if (kept.length > 0 && used + cost > maxChars) break;
+    kept.unshift(segments[i]);
+    used += cost;
+  }
+  const elided = kept.length < segments.length ? "…/" : "";
+  return `${elided}${kept.join("/")}/`;
+}
