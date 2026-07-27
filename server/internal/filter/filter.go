@@ -46,26 +46,54 @@ const (
 var (
 	adultDomainRe = regexp.MustCompile(adultDomainPattern)
 	javCodeRe     = regexp.MustCompile(javCodePattern)
+	javStudioRe   = regexp.MustCompile(javStudioPattern)
 
-	// substrings holds tokens matched by plain substring search.
-	substrings []string
-	// wordRe matches short ASCII tokens on word boundaries.
-	wordRe *regexp.Regexp
+	// matcher for adultKeywords, applied to the name and every file path.
+	kwAll matcher
+	// matcher for adultNameKeywords, applied to the name only.
+	kwName matcher
 )
 
-func init() {
+// matcher matches a keyword list: plain substring search for CJK and longer
+// tokens, word-boundary regex for short ASCII tokens.
+type matcher struct {
+	substrings []string
+	wordRe     *regexp.Regexp
+}
+
+func newMatcher(keywords []string) matcher {
+	var m matcher
 	var shorts []string
-	for _, kw := range adultKeywords {
+	for _, kw := range keywords {
 		kw = strings.ToLower(kw)
 		if isShortASCII(kw) {
 			shorts = append(shorts, regexp.QuoteMeta(kw))
 		} else {
-			substrings = append(substrings, kw)
+			m.substrings = append(m.substrings, kw)
 		}
 	}
 	if len(shorts) > 0 {
-		wordRe = regexp.MustCompile(`\b(?:` + strings.Join(shorts, "|") + `)\b`)
+		m.wordRe = regexp.MustCompile(`\b(?:` + strings.Join(shorts, "|") + `)\b`)
 	}
+	return m
+}
+
+// find returns the first keyword found in the lowercased text, or "".
+func (m matcher) find(text string) string {
+	for _, kw := range m.substrings {
+		if strings.Contains(text, kw) {
+			return kw
+		}
+	}
+	if m.wordRe != nil {
+		return m.wordRe.FindString(text)
+	}
+	return ""
+}
+
+func init() {
+	kwAll = newMatcher(adultKeywords)
+	kwName = newMatcher(adultNameKeywords)
 }
 
 // isShortASCII reports whether s is a short pure-ASCII token for which
@@ -98,19 +126,13 @@ func Check(name string, files []File, totalSize int64) Result {
 		if text == "" {
 			return
 		}
-		for _, kw := range substrings {
-			if strings.Contains(text, kw) {
-				add("adult keyword %q in %s", kw, what)
-				adultHit = true
-				return
-			}
+		for _, ex := range adultExceptions {
+			text = strings.ReplaceAll(text, strings.ToLower(ex), "")
 		}
-		if wordRe != nil {
-			if m := wordRe.FindString(text); m != "" {
-				add("adult token %q in %s", m, what)
-				adultHit = true
-				return
-			}
+		if kw := kwAll.find(text); kw != "" {
+			add("adult keyword %q in %s", kw, what)
+			adultHit = true
+			return
 		}
 		if m := adultDomainRe.FindString(text); m != "" {
 			add("adult site domain %q in %s", m, what)
@@ -118,10 +140,22 @@ func Check(name string, files []File, totalSize int64) Result {
 		}
 	}
 	checkAdult("name", lowerName)
+	// Adult-forum banners count only in the name: ad files carrying the same
+	// banners get bundled into legitimate uploads.
+	if kw := kwName.find(lowerName); kw != "" && !adultHit {
+		add("adult site banner %q in name", kw)
+		adultHit = true
+	}
+	// A known JAV studio code is a strong signal on its own.
+	if m := javStudioRe.FindString(lowerName); m != "" && !adultHit {
+		add("jav studio code %q in name", m)
+		adultHit = true
+	}
 	for _, f := range files {
 		checkAdult("file", strings.ToLower(f.Path))
 	}
-	// JAV code is a weak signal: only flag when another adult signal hit.
+	// A generic release-code shape is a weak signal: only flag when another
+	// adult signal hit.
 	if javCodeRe.MatchString(name) && adultHit {
 		add("jav-style product code in name")
 	}

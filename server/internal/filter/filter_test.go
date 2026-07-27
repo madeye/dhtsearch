@@ -70,8 +70,10 @@ func TestAdultDomainBlocked(t *testing.T) {
 }
 
 func TestJavCodeAloneDoesNotFlag(t *testing.T) {
-	// JAV-style code without any other adult signal must not flag.
-	r := Check("ABP-123 mystery release", mkFiles("video.mp4"), 1<<30)
+	// A generic release-code shape without any other adult signal must not
+	// flag. (Codes of known JAV studios, e.g. ABP-123, are a separate strong
+	// signal — see TestJavStudioCodeBlocked.)
+	r := Check("GTX-4090 benchmark suite", mkFiles("video.mp4"), 1<<30)
 	if r.Adult {
 		t.Fatalf("jav code alone should not flag: %+v", r)
 	}
@@ -214,5 +216,64 @@ func TestRejectedReportsAnySignal(t *testing.T) {
 		if !r.Rejected() {
 			t.Errorf("%+v should be rejected", r)
 		}
+	}
+}
+
+func TestMinedAdultKeywordsBlocked(t *testing.T) {
+	cases := []string{
+		// The listing that motivated the mined batch: suggestive prose with
+		// no wordlist term until 屁股 was added.
+		"可爱学妹小狗〖软萌兔兔酱〗小草神女仆，QQ弹弹的小屁股，bb又很紧温润。做起来很舒服",
+		"第一會所新片@SIS001@最新合集",
+		"高颜值探花小姐姐酒店私拍",
+		"麻豆传媒 MDX-0021",
+	}
+	for _, name := range cases {
+		if r := Check(name, mkFiles("video.mp4"), 1<<30); !r.Adult {
+			t.Errorf("adult name %q not flagged: %+v", name, r)
+		}
+	}
+}
+
+func TestJavStudioCodeBlocked(t *testing.T) {
+	for _, name := range []string{"IPZZ-586 1080p", "SSNI987", "midv-192 中文字幕"} {
+		if r := Check(name, mkFiles("video.mp4"), 1<<30); !r.Adult {
+			t.Errorf("jav studio code %q not flagged: %+v", name, r)
+		}
+	}
+	// The generic code shape alone must stay a weak signal.
+	if r := Check("MTLS-001 conference recordings", mkFiles("talk.mp4"), 1<<30); r.Adult {
+		t.Errorf("generic code wrongly flagged: %+v", r)
+	}
+}
+
+func TestBannerInNameOnlyNotFiles(t *testing.T) {
+	// A forum banner in the display name marks the release as adult.
+	if r := Check("1024草榴社區 t66y 合集", mkFiles("video.mp4"), 1<<30); !r.Adult {
+		t.Errorf("banner in name not flagged: %+v", r)
+	}
+	// The same banner inside a bundled ad file must not reject the torrent:
+	// these ads ride along with perfectly legitimate uploads.
+	r := Check("流浪地球2 2023 1080p WEB-DL",
+		mkFiles("movie.mkv", "1024草榴社區 t66y.com.txt", "久度空间~BT分享平台~免註冊下載.url"), 4<<30)
+	if r.Adult || r.Spam {
+		t.Errorf("legit movie with bundled ad files flagged: %+v", r)
+	}
+}
+
+func TestMainstreamProfanityAndExceptionsPass(t *testing.T) {
+	for _, name := range []string{
+		"FUCK.2006.720p.x264-DON",
+		"The.End.Of.The.Fucking.World.Season.01.1080p",
+		"[ANi] 幼女戰記 2 - 01 [1080P][Baha][WEB-DL].mp4",
+		"幼女战记 剧场版 2019 BDRip",
+	} {
+		if r := Check(name, mkFiles("video.mkv"), 2<<30); r.Adult {
+			t.Errorf("mainstream release %q wrongly flagged: %+v", name, r)
+		}
+	}
+	// Standalone 幼女 outside the anime title must still be flagged.
+	if r := Check("幼女 合集", mkFiles("v.mp4"), 1<<30); !r.Adult {
+		t.Errorf("standalone 幼女 not flagged: %+v", r)
 	}
 }

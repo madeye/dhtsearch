@@ -54,6 +54,35 @@ var adultKeywords = []string{
 	"母狗", "调教", "性奴", "虐待", "凌辱", "SM视频", "重口味",
 	"猎奇", "触手", "异种奸", "电车痴汉", "痴汉", "露出", "野外",
 	"偷拍自拍", "国产自拍", "自拍视频", "酒店偷拍", "情侣自拍",
+	// --- Mined from LLM moderation removals (2026-07): terms with high
+	// frequency in removed titles and zero hits in LLM-approved titles. ---
+	"啪啪", "私拍", "探花", "少妇", "高潮", "寝取", "奶子", "抽插",
+	"大尺度", "小穴", "嫩穴", "爆操", "约啪", "国模", "露脸", "反差婊",
+	"幼女", "学生妹", "屁股", "流出", "泄密", "外围女", "后入式",
+	"麻豆传媒", "天美传媒", "星空传媒", "果冻传媒", "精东影业",
+	// English porn studios and networks seen in removed titles. Profanity
+	// words (fuck etc.) are deliberately absent: corpus replay showed they
+	// hit mainstream releases (FUCK.2006, The.End.Of.The.Fucking.World).
+	"blacked", "vixen.com", "tushy", "metart", "sexart", "manyvids",
+	"clips4sale",
+}
+
+// adultExceptions are known-legitimate phrases that contain an adult keyword.
+// They are removed from the text before keyword matching, so 幼女戰記 (the
+// anime "Saga of Tanya the Evil") does not trip the 幼女 keyword.
+var adultExceptions = []string{
+	"幼女戰記", "幼女战记", "幼女戦記",
+}
+
+// adultNameKeywords are matched against the torrent NAME only, never file
+// paths. These are adult-forum banners and release-site tags: ad files like
+// "1024草榴社區 t66y.com.txt" get bundled into perfectly legitimate uploads,
+// so a file-path match would reject normal content. A banner in the display
+// name, though, marks the release itself as coming from an adult site.
+var adultNameKeywords = []string{
+	"第一会所", "第一會所", "草榴", "t66y", "sexinsex", "sex8.cc",
+	"桃花族", "thz.la", "madoubt", "kks11.cc", "bydda.cc", "u5a5.com",
+	"dxxdom", "dccdom", "odnbt", "22sht.me", "julyjailbait",
 }
 
 // adultDomainRe matches common adult-site style domains appearing in names,
@@ -64,3 +93,9 @@ var adultDomainPattern = `(?i)\b(?:www\.)?[a-z0-9][a-z0-9-]{1,30}\.(?:xxx|porn|s
 // This is a weak signal: it only flags content when another adult signal
 // already matched, to avoid false positives on unrelated codes.
 var javCodePattern = `\b[a-zA-Z]{2,6}-?\d{3,5}\b`
+
+// javStudioPattern matches product codes of known JAV studios, which is a
+// strong signal on its own (unlike the generic shape above). Prefixes come
+// from LLM moderation removals plus the major studio catalogs; all had zero
+// hits in LLM-approved titles.
+var javStudioPattern = `\b(?:ssis|ssni|snis|sone|snos|ipzz|ipz|ipx|mide|midv|mida|abp|abw|pred|juq|meyd|pppd|ebod|miaa|cawd|waaa|fsdss|dldss|dass)-?\d{3,5}\b`
