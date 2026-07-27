@@ -82,15 +82,15 @@ func main() {
 	// LLM moderation pass.
 	modEnabled := flag.Bool("moderate", envBool("MODERATION_ENABLED", true),
 		"enable the periodic LLM moderation pass (requires OPENAI_API_KEY)")
-	modBaseURL := flag.String("moderate-base-url", envDefault("OPENAI_BASE_URL", "https://api.deepseek.com/v1"),
+	modBaseURL := flag.String("moderate-base-url", envDefault("OPENAI_BASE_URL", "https://openrouter.ai/api/v1"),
 		"OpenAI-compatible API base URL")
-	modModel := flag.String("moderate-model", envDefault("OPENAI_MODEL", "deepseek-v4-flash"),
+	modModel := flag.String("moderate-model", envDefault("OPENAI_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"),
 		"chat model used for moderation")
 	modInterval := flag.Duration("moderate-interval", envDuration("MODERATION_INTERVAL", time.Hour),
 		"how often to run the moderation pass")
-	modBatch := flag.Int("moderate-batch", envInt("MODERATION_BATCH_SIZE", 50),
+	modBatch := flag.Int("moderate-batch", envInt("MODERATION_BATCH_SIZE", 100),
 		"torrent titles per moderation request")
-	modMaxBatches := flag.Int("moderate-max-batches", envInt("MODERATION_MAX_BATCHES", 40),
+	modMaxBatches := flag.Int("moderate-max-batches", envInt("MODERATION_MAX_BATCHES", 20),
 		"max batches per moderation pass (0 = unlimited)")
 	modDryRun := flag.Bool("moderate-dry-run", envBool("MODERATION_DRY_RUN", false),
 		"log what moderation would delete without deleting it")
