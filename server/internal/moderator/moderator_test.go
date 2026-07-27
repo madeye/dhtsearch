@@ -60,9 +60,13 @@ func fakeAPI(t *testing.T, label func(title string) string, calls *int32) *httpt
 			I     int    `json:"i"`
 			Label string `json:"label"`
 		}
+		var items []promptItem
+		if err := json.Unmarshal([]byte(req.Messages[1].Content), &items); err != nil {
+			t.Fatalf("listing is not JSON: %v (%q)", err, req.Messages[1].Content)
+		}
 		var out []v
-		for i, line := range strings.Split(strings.TrimSpace(req.Messages[1].Content), "\n") {
-			out = append(out, v{I: i + 1, Label: label(line)})
+		for _, it := range items {
+			out = append(out, v{I: it.I, Label: label(it.Title)})
 		}
 		content, _ := json.Marshal(map[string]any{"verdicts": out})
 		json.NewEncoder(w).Encode(chatResponse{Choices: []struct {

@@ -179,3 +179,47 @@ func TestOpenMigratesPreModerationDB(t *testing.T) {
 	}
 	s2.Close()
 }
+
+func TestSetCleanNamesReplacesDisplayNameOnly(t *testing.T) {
+	s := openTest(t)
+	const raw = "【发布页 www.spam.net】Blue Bloods S14E03 1080p"
+	if err := s.Upsert(Torrent{InfoHash: "aa", Name: raw, TotalSize: 1 << 30, FileCount: 1, CreatedAt: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.SetCleanNames(map[string]string{"aa": "Blue Bloods S14E03 1080p"})
+	if err != nil || n != 1 {
+		t.Fatalf("SetCleanNames = %d, %v; want 1, nil", n, err)
+	}
+
+	// Search returns the cleaned title...
+	items, _, err := s.Search("", 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Name != "Blue Bloods S14E03 1080p" {
+		t.Errorf("Name = %q, want the cleaned title", items[0].Name)
+	}
+
+	// ...but the raw title is preserved in the row and still matches.
+	var stored string
+	if err := s.db.QueryRow(`SELECT name FROM torrents WHERE info_hash='aa'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != raw {
+		t.Errorf("stored name = %q, want the raw title %q", stored, raw)
+	}
+	for _, q := range []string{"spam.net", "Blue Bloods", "Bloods 1080p"} {
+		if _, total, err := s.Search(q, 1, 10); err != nil || total != 1 {
+			t.Errorf("Search(%q) total = %d err = %v, want 1", q, total, err)
+		}
+	}
+}
+
+func TestSetCleanNamesEmptyMapIsNoOp(t *testing.T) {
+	s := openTest(t)
+	n, err := s.SetCleanNames(nil)
+	if err != nil || n != 0 {
+		t.Fatalf("SetCleanNames(nil) = %d, %v; want 0, nil", n, err)
+	}
+}

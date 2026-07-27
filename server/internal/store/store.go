@@ -56,7 +56,11 @@ CREATE TABLE IF NOT EXISTS torrents (
 	file_count  INTEGER NOT NULL,
 	files_json  TEXT NOT NULL,
 	created_at  INTEGER NOT NULL,
-	reviewed_at INTEGER NOT NULL DEFAULT 0
+	reviewed_at INTEGER NOT NULL DEFAULT 0,
+	-- Title with promotional junk stripped by the moderation pass. Empty means
+	-- "not trimmed"; name always keeps the raw title so trimming is reversible
+	-- and search still matches text that only appears in the original.
+	clean_name  TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS stats (
 	key   TEXT PRIMARY KEY,
@@ -79,10 +83,15 @@ CREATE TABLE IF NOT EXISTS blocked (
 	// case on an already-migrated database. This must run before anything
 	// that references reviewed_at — on a pre-migration database the column
 	// does not exist yet and those statements would fail.
-	if _, err := db.Exec(`ALTER TABLE torrents ADD COLUMN reviewed_at INTEGER NOT NULL DEFAULT 0`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column name") {
-		db.Close()
-		return nil, fmt.Errorf("migrate reviewed_at: %w", err)
+	for _, m := range []struct{ name, stmt string }{
+		{"reviewed_at", `ALTER TABLE torrents ADD COLUMN reviewed_at INTEGER NOT NULL DEFAULT 0`},
+		{"clean_name", `ALTER TABLE torrents ADD COLUMN clean_name TEXT NOT NULL DEFAULT ''`},
+	} {
+		if _, err := db.Exec(m.stmt); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("migrate %s: %w", m.name, err)
+		}
 	}
 	// Partial index: only unreviewed rows are indexed, so it stays tiny and the
 	// moderation sweep never scans the full table. Created after the migration
@@ -122,15 +131,18 @@ func (s *Store) Search(query string, page, pageSize int) (items []Torrent, total
 	if len(keywords) > 0 {
 		var conds []string
 		for _, kw := range keywords {
-			conds = append(conds, "name LIKE ? ESCAPE '\\'")
-			args = append(args, "%"+escapeLike(kw)+"%")
+			// Match either title: the raw one so trimming can never hide a
+			// result, and the cleaned one so a phrase that only reads
+			// contiguously once the ad text is gone still matches.
+			conds = append(conds, "(name LIKE ? ESCAPE '\\' OR clean_name LIKE ? ESCAPE '\\')")
+			args = append(args, "%"+escapeLike(kw)+"%", "%"+escapeLike(kw)+"%")
 		}
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
 	if err = s.db.QueryRow(`SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := `SELECT info_hash, name, total_size, file_count, files_json, created_at
+	q := `SELECT info_hash, IIF(clean_name <> '', clean_name, name), total_size, file_count, files_json, created_at
 	      FROM torrents` + where + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
 	rows, err := s.db.Query(q, append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
@@ -188,6 +200,40 @@ func (s *Store) MarkReviewed(hashes []string, ts int64) error {
 	_, err := s.db.Exec(
 		`UPDATE torrents SET reviewed_at = ? WHERE info_hash IN (`+placeholders(len(hashes))+`)`, args...)
 	return err
+}
+
+// SetCleanNames records trimmed titles. clean is keyed by info hash and holds
+// the title with promotional text removed; the raw name column is left alone.
+// Returns the number of rows updated.
+func (s *Store) SetCleanNames(clean map[string]string) (int64, error) {
+	if len(clean) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	up, err := tx.Prepare(`UPDATE torrents SET clean_name = ? WHERE info_hash = ?`)
+	if err != nil {
+		return 0, err
+	}
+	defer up.Close()
+
+	var n int64
+	for hash, name := range clean {
+		res, err := up.Exec(name, hash)
+		if err != nil {
+			return 0, err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		n += affected
+	}
+	return n, tx.Commit()
 }
 
 // Block deletes the named torrents and records them as rejected so the

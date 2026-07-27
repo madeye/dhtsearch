@@ -97,6 +97,7 @@ LLM 审核相关（见下文「LLM 二次审核」）：
 | `MODERATION_BATCH_SIZE` | `50` | 每次请求送审的标题数 |
 | `MODERATION_MAX_BATCHES` | `40` | 每轮最多几批（0 = 不限），用于封顶开销 |
 | `MODERATION_DRY_RUN` | `false` | 只打日志不删除 |
+| `MODERATION_TRIM_TITLES` | `true` | 顺带清理标题里的广告文字 |
 
 ### 前端
 
@@ -132,7 +133,7 @@ npm run dev                  # 开发
 - **不会复活**：删除的 infohash 写入 `blocked` 表，爬虫与增量同步都不会再把它加回来
 - **失败安全**：API 报错时该批不标记已审，下轮重试；模型返回无法解析、标签未知或漏项一律按 `ok` 处理，绝不因不确定而删除
 - **开销可控**：`MODERATION_MAX_BATCHES × MODERATION_BATCH_SIZE` 即每小时上限（默认 2000 条／小时）
-- **提示词**：明确要求「盗版本身不算垃圾」，否则模型会把整个库都判成垃圾；见 `server/internal/moderator/moderator.go` 的 `systemPrompt`
+- **提示词**：明确要求「盗版本身不算垃圾」，否则模型会把整个库都判成垃圾；见 `server/internal/moderator/moderator.go` 的 `systemPromptFor`
 
 首次开启建议先跑一轮 dry-run 看日志，确认判定符合预期再放开删除：
 
@@ -141,6 +142,32 @@ MODERATION_DRY_RUN=true go run ./cmd/server
 ```
 
 审核统计通过 `GET /api/stats` 的 `moderation` 字段暴露（`reviewed` / `adult_removed` / `spam_removed` / `errors` / `pending` / `blocked`）。
+
+### 顺带：标题去广告（`MODERATION_TRIM_TITLES`）
+
+同一次审核请求里让模型多返回一个 `clean` 字段，把标题里的站点横幅、推广域名、
+「地址发布页 / 收藏不迷路」之类的招徕语和上传者广告尾巴删掉。共用同一次调用，
+只多花输出 token，不会多一轮请求。
+
+- **原名不动**：清理后的标题写进 `clean_name` 列，`name` 永远保留原文，随时可回退
+- **搜索不丢结果**：两列都参与匹配，删掉的广告文字照样能搜到；被广告切断的词组
+  反而因为 `clean_name` 变得可搜
+- **只删不改**：模型只许删字符。结果必须是原标题的**子序列**，否则丢弃——这一条
+  校验就挡掉了改写、翻译、重排和凭空捏造；另有长度下限（≥4 字符且不少于原长 25%）
+- **超长标题不动**：标题超过 200 字符时送审的是截断版，模型没看过尾巴，直接跳过
+- **审计**：每条改动都打印 `moderator: trim <hash> "原名" -> "新名"`，
+  计数进 `llm_titles_trimmed`
+
+实测（deepseek-v4-flash）：`www.UIndex.org - `、`【高清剧集网发布 www.BPHDTV.com】`、
+`[TGx]`、`[EZTVx.to]`、`[ WebToolTip.com ]` 都能正确删除；而
+`【推しの子】`（作品名）、`iDOLM@STER`、`[Erai-raws]`、`-FraMeSToR`
+（字幕组／压制组）都会原样保留。
+
+已经审核过的旧记录不会自动重审。要给存量数据补跑一遍（会重新计费）：
+
+```sql
+UPDATE torrents SET reviewed_at = 0;
+```
 
 ## 部署
 
