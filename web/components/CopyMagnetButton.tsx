@@ -1,22 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import { copyText } from "@/lib/clipboard";
 
 export default function CopyMagnetButton({ magnet }: { magnet: string }) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(magnet);
-    } catch {
-      // Fallback for older browsers / non-secure contexts
-      const ta = document.createElement("textarea");
-      ta.value = magnet;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-    }
+    await copyText(magnet);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
