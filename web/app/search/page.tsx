@@ -3,7 +3,7 @@ import Link from "next/link";
 import { fetchSearch, type SearchResponse } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
-import ResultCard from "@/components/ResultCard";
+import ResultList from "@/components/ResultList";
 import Pagination from "@/components/Pagination";
 
 interface PageProps {
@@ -68,11 +68,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
               <>最新收录 · 共 {formatCount(data.total)} 条</>
             )}
           </p>
-          <div className="mt-3 space-y-3">
-            {data.results.map((r) => (
-              <ResultCard key={r.info_hash} result={r} />
-            ))}
-          </div>
+          <ResultList results={data.results} />
           <Pagination q={q} page={data.page ?? page} total={data.total ?? 0} pageSize={data.page_size ?? pageSize} />
         </>
       ) : (

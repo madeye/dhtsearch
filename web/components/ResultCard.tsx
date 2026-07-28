@@ -13,7 +13,15 @@ import CopyMagnetButton from "./CopyMagnetButton";
 
 const MAX_FILES_SHOWN = 10;
 
-export default function ResultCard({ result }: { result: SearchResult }) {
+export default function ResultCard({
+  result,
+  selected,
+  onToggleSelect,
+}: {
+  result: SearchResult;
+  selected: boolean;
+  onToggleSelect: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const files = result.files ?? [];
   const shownFiles = files.slice(0, MAX_FILES_SHOWN);
@@ -27,8 +35,23 @@ export default function ResultCard({ result }: { result: SearchResult }) {
   const root = commonDirPrefix(files.map((f) => f.path));
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 transition-colors hover:border-zinc-700">
+    <div
+      className={`rounded-lg border bg-zinc-900/60 p-4 transition-colors ${
+        selected
+          ? "border-emerald-700/70 bg-emerald-950/20"
+          : "border-zinc-800 hover:border-zinc-700"
+      }`}
+    >
       <div className="flex items-start justify-between gap-3">
+        {/* Native checkbox for free keyboard/screen-reader semantics; mt-1
+            lines it up with the first line of the title. */}
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelect}
+          aria-label={`选择 ${result.name || "(未命名)"}`}
+          className="mt-1 h-4 w-4 shrink-0 cursor-pointer accent-emerald-500"
+        />
         <button
           onClick={() => setExpanded((v) => !v)}
           className="min-w-0 flex-1 text-left"
