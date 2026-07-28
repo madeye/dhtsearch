@@ -144,6 +144,23 @@ real_ip_header CF-Connecting-IP;
 
 直连绕过 CF 的流量不在信任网段内，`CF-Connecting-IP` 伪造无效，仍按对端真实地址限流。CF 网段偶有更新，建议定期比对官方列表。
 
+### Cloudflare Bot Challenge
+
+生产站点可在 Cloudflare WAF Custom Rules 中对公开搜索页启用
+**Managed Challenge**，让可疑客户端在请求到达 Next.js 和 Go 后端前完成验证：
+
+```text
+http.host eq "search.example.com" and
+http.request.uri.path eq "/search" and
+not cf.client.bot
+```
+
+把这条规则放在任何 `skip` 规则之前。搜索表单和翻页链接使用完整文档导航，
+而不是 Next.js 客户端路由；Cloudflare 的 interstitial challenge 是 HTML 页面，
+若它落进 RSC/fetch 请求，浏览器无法正常展示。验证通过后 Cloudflare 用
+`cf_clearance` cookie 放行后续搜索。若 Go API 也直接暴露在公网，还应把公开
+API 搜索路径加入同一防护规则；仅监听回环地址时则不需要。
+
 ## 过滤策略
 
 ### 第一道：入库前的静态过滤
