@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import type { MouseEvent } from "react";
 
 interface PaginationProps {
   q: string;
@@ -16,11 +19,20 @@ export default function Pagination({ q, page, total, pageSize }: PaginationProps
     "rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-emerald-600 hover:text-emerald-400";
   const disabledCls =
     "cursor-not-allowed rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-600";
+  const navigate = (event: MouseEvent<HTMLAnchorElement>, href: string) => {
+    event.preventDefault();
+    window.location.assign(href);
+  };
 
   return (
     <nav className="mt-6 flex items-center justify-center gap-4">
       {page > 1 ? (
-        <Link href={mkHref(page - 1)} className={btnCls}>
+        <Link
+          href={mkHref(page - 1)}
+          className={btnCls}
+          prefetch={false}
+          onClick={(event) => navigate(event, mkHref(page - 1))}
+        >
           ← 上一页
         </Link>
       ) : (
@@ -30,7 +42,12 @@ export default function Pagination({ q, page, total, pageSize }: PaginationProps
         第 {page} / {totalPages} 页
       </span>
       {page < totalPages ? (
-        <Link href={mkHref(page + 1)} className={btnCls}>
+        <Link
+          href={mkHref(page + 1)}
+          className={btnCls}
+          prefetch={false}
+          onClick={(event) => navigate(event, mkHref(page + 1))}
+        >
           下一页 →
         </Link>
       ) : (

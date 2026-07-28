@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
 interface SearchBoxProps {
@@ -9,13 +8,18 @@ interface SearchBoxProps {
 }
 
 export default function SearchBox({ initialQuery = "", large = false }: SearchBoxProps) {
-  const router = useRouter();
   const [q, setQ] = useState(initialQuery);
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     const query = q.trim();
-    router.push(query ? `/search?q=${encodeURIComponent(query)}` : "/search");
+    // Cloudflare may return an interstitial Managed Challenge for /search.
+    // A client-side router fetch cannot display that HTML challenge, so make
+    // search a document navigation and let Cloudflare complete its normal
+    // challenge -> cf_clearance -> page flow.
+    window.location.assign(
+      query ? `/search?q=${encodeURIComponent(query)}` : "/search",
+    );
   }
 
   return (
