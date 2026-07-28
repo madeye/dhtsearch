@@ -10,28 +10,28 @@
 
 ```mermaid
 flowchart TB
-    DHT["公共 BitTorrent DHT 节点"]
-    Crawler["DHT 爬虫<br/>被动收听 + BEP-51 主动采样"]
-    Scraper["Tracker 刮削排序<br/>BEP 15 批量 scrape"]
-    Fetcher["元数据获取<br/>BEP-9 workers"]
-    Filter{"过滤引擎<br/>关键词 + 启发式 + 体积"}
-    Discard["丢弃并计数<br/>成人 / 垃圾 / 过小"]
+    DHT["Public BitTorrent DHT nodes"]
+    Crawler["DHT crawler<br/>passive listen + BEP-51 sampling"]
+    Scraper["Tracker scrape ranking<br/>BEP 15 batch scrape"]
+    Fetcher["Metadata fetch<br/>BEP-9 workers"]
+    Filter{"Filter engine<br/>keywords + heuristics + size"}
+    Discard["Drop and count<br/>adult / spam / too small"]
     DB[("SQLite")]
-    Web["Next.js 前端"]
-    Mod["LLM 审核<br/>OpenRouter 免费模型"]
-    Blocked[("blocked 表")]
+    Web["Next.js frontend"]
+    Mod["LLM moderation<br/>OpenRouter free model"]
+    Blocked[("blocked table")]
 
     Crawler <-->|UDP| DHT
-    Crawler -->|新 infohash| Scraper
-    Scraper -->|按 seeder 数排序| Fetcher
+    Crawler -->|new infohashes| Scraper
+    Scraper -->|ranked by seeders| Fetcher
     Fetcher --> Filter
-    Filter -->|命中| Discard
-    Filter -->|通过| DB
+    Filter -->|hit| Discard
+    Filter -->|pass| DB
     Web <-->|REST API| DB
-    DB -->|每小时增量送审| Mod
-    Mod -->|判定成人/垃圾 → 删除| Blocked
-    Mod -->|标题去广告 clean_name| DB
-    Blocked -.->|入库时拒绝，防复活| DB
+    DB -->|hourly incremental review| Mod
+    Mod -->|adult/spam: delete| Blocked
+    Mod -->|title ad-trim: clean_name| DB
+    Blocked -.->|rejected on insert, no resurrection| DB
 ```
 
 - `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、SQLite 存储（modernc.org/sqlite，无 cgo）、REST API（标准库 net/http）
