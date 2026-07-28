@@ -31,6 +31,11 @@ export default function ResultList({ results }: { results: SearchResult[] }) {
     setCopied(false);
   }
 
+  function clearSelection() {
+    setSelected(new Set());
+    setCopied(false);
+  }
+
   async function copySelected() {
     const magnets = results
       .filter((r) => selected.has(r.info_hash))
@@ -90,6 +95,24 @@ export default function ResultList({ results }: { results: SearchResult[] }) {
                     <span className="hidden sm:inline">复制磁力链接</span>
                   </>
                 )}
+              </button>
+              <button
+                onClick={clearSelection}
+                title="取消选择"
+                aria-label="取消选择"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700 bg-zinc-800 text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200 sm:h-7 sm:w-7"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  className="h-4 w-4"
+                  aria-hidden
+                >
+                  <path d="M18 6 6 18M6 6l12 12" />
+                </svg>
               </button>
             </div>
           </div>
