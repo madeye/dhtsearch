@@ -50,6 +50,8 @@ type Options struct {
 	// StatsTTL is how long stats and total-count responses are served from
 	// cache. Stats hit four aggregate queries; caching makes them O(1).
 	StatsTTL time.Duration
+	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
+	ScraperStatus func() ScraperStatus
 }
 
 // CrawlerStatus describes the crawler for the stats endpoint. The sampler
@@ -64,6 +66,18 @@ type CrawlerStatus struct {
 	Sampled   int64 `json:"sampled"`
 	SampleErr int64 `json:"sample_errors"`
 	Harvested int64 `json:"harvested"`
+}
+
+// ScraperStatus describes the tracker-scrape prioritizer. Seeded/Scraped is
+// the share of discovered hashes with at least one tracker-known seeder;
+// Evicted counts hashes that lost their fetch slot to better-seeded ones.
+type ScraperStatus struct {
+	Queue      int   `json:"queue"`
+	Scraped    int64 `json:"scraped"`
+	Seeded     int64 `json:"seeded"`
+	ScrapeErrs int64 `json:"scrape_errors"`
+	Dropped    int64 `json:"dropped"`
+	Evicted    int64 `json:"evicted"`
 }
 
 // Server serves the search API.
@@ -313,6 +327,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.crawler != nil {
 		resp["crawler"] = s.crawler()
+	}
+	if s.opts.ScraperStatus != nil {
+		resp["scraper"] = s.opts.ScraperStatus()
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {

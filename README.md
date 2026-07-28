@@ -54,6 +54,23 @@ infohash 来自两条路径，**主动的那条决定吞吐**：
 
 最后一条最反直觉：找 peer 本身就占掉大部分等待时间，**能成功的获取本来就是慢的那些**，缩超时等于把它们全砍掉。换硬件请照着 `/api/stats` 重新测，别照抄。
 
+### Tracker 刮削排序
+
+既然 99% 的发现结果注定被丢弃，**丢谁**就决定了索引长成什么样。默认开启的
+scraper（`SCRAPE_ENABLED`）在爬虫和获取端之间插了一层：把新发现的 infohash 攒成
+批（一个 UDP 包最多问 ~70 个），向几个大型公共 tracker 发 BEP 15 scrape 拿到
+seeder 数，然后按 seeder 数从高到低喂给获取端——热门资源（多为影视内容）优先，
+0 seeder 的只是排队靠后，不会被直接扔掉；队列满了先踢 seeder 最少的，等价于把
+原来的「随机丢」换成「有依据地丢」。热门资源 peer 多，获取成功率也更高，排序本
+身就在提升吞吐。
+
+同一份 `TRACKERS` 列表还会以 `&tr=` 附在获取端的磁力链接上：tracker 一次往返就
+能拿到 peer 列表，省掉吃掉大半 `META_TIMEOUT` 的 DHT 找 peer 游走。
+
+看 `/api/stats` 的 `scraper` 段：`seeded/scraped` 是命中率（有 seeder 的占比），
+`queue` 是排队深度，`evicted` 是被挤掉的低优先级 hash，`scrape_errors` 持续增长
+说明某个 tracker 挂了（自动重连，也可换 `TRACKERS`）。
+
 ## 快速开始
 
 ### 后端
