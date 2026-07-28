@@ -248,6 +248,30 @@ DEPLOY_HOST=user@example.com ./deploy.sh
 
 > `deploy.sh` **不会上传 `.env`**（密钥不进部署管道）。服务器上的 API key 需自行放置一次：把 `.env` 放到 `DEPLOY_DIR`（systemd 的 `WorkingDirectory`），或用 systemd 的 `EnvironmentFile=` 指向一个 root-only 的文件。缺少 key 时服务照常运行，只是 LLM 审核不启动。
 
+### 每小时备份到 Cloudflare R2
+
+`scripts/backup-r2.sh` 每小时把数据库快照上传到 R2（S3 兼容 API，走 rclone），
+**只保留最新一份**：固定对象名，每小时覆盖。S3 的对象替换是原子的——上传失败
+或中断时旧快照原样保留，不存在「没有备份」的窗口。直接拷贝 WAL 模式下的库文件
+可能拷到写了一半的状态，所以快照用 `VACUUM INTO`（SQLite 自己的锁保证一致性，
+顺带压实），先 `PRAGMA quick_check` 验证再 zstd 压缩上传。
+
+一次性安装（服务器已有 rclone/sqlite3/zstd）：
+
+```bash
+# 1. 凭证：Cloudflare 仪表盘 -> R2 -> Manage R2 API Tokens 建一个
+#    仅限该桶的 Object Read & Write token，填进 backup.env.example
+#    并放到 /opt/dhtsearch/.backup.env（chmod 600）
+# 2. 单元文件：
+cp scripts/systemd/dhtsearch-backup.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now dhtsearch-backup.timer
+# 3. 手动跑一次验证：
+systemctl start dhtsearch-backup && journalctl -u dhtsearch-backup -n 5
+```
+
+恢复：下载对象、`zstd -d` 解压、停 `dhtsearch-api`、替换
+`data/dhtsearch.db`、重启即可（脚本头部有完整命令）。
+
 ## 本地爬虫 + 增量同步（可选）
 
 除了在服务器上爬，还可以在本地跑第二个爬虫实例，定时把增量索引合并到服务器：

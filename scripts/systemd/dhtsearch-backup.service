@@ -1,0 +1,20 @@
+# One-shot database backup to Cloudflare R2. Fired by dhtsearch-backup.timer;
+# run manually with: systemctl start dhtsearch-backup
+#
+# Install (one-time, matching deploy.sh's "units are server setup" rule):
+#   cp scripts/systemd/dhtsearch-backup.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now dhtsearch-backup.timer
+[Unit]
+Description=DHTSearch hourly database backup to Cloudflare R2
+# Backups are worth taking even if the API is down; no Requires= on purpose.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dhtsearch/backup-r2.sh
+# The snapshot runs VACUUM INTO on a ~tens-of-MB database; give it slack but
+# never let a hung upload pile onto the next hour's run.
+TimeoutStartSec=15min
+Nice=10
+IOSchedulingClass=idle
