@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly DHTSearch database backup to Cloudflare R2
+
+[Timer]
+OnCalendar=hourly
+# Spread the start over 5 minutes so the backup doesn't always collide with
+# the hourly LLM moderation pass, and catch up after reboots/downtime.
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

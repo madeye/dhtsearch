@@ -47,6 +47,10 @@ echo "==> Uploading to $DEPLOY_HOST:$DEPLOY_DIR"
 ssh "$DEPLOY_HOST" "mkdir -p '$DEPLOY_DIR/data' '$DEPLOY_DIR/web'"
 rsync -az "$BUILD_DIR/dhtsearch-server" "$DEPLOY_HOST:$DEPLOY_DIR/server"
 rsync -az --delete "$BUILD_DIR/web/" "$DEPLOY_HOST:$DEPLOY_DIR/web/"
+# Backup script rides along so fixes propagate; its systemd units and
+# credentials are one-time server setup like the other units (see
+# scripts/systemd/ and backup.env.example).
+rsync -az "$ROOT_DIR/scripts/backup-r2.sh" "$DEPLOY_HOST:$DEPLOY_DIR/backup-r2.sh"
 
 echo "==> Restarting services"
 ssh "$DEPLOY_HOST" "systemctl restart dhtsearch-api dhtsearch-web"
