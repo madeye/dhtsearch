@@ -8,26 +8,30 @@
 
 ## 架构
 
-```
-┌────────────┐   DHT 网络    ┌──────────────────────────────┐
-│ DHT 爬虫    │◄────────────►│ 公共 BitTorrent DHT 节点       │
-│ (infohash)  │              └──────────────────────────────┘
-└─────┬──────┘
-      ▼
-┌────────────┐   BEP-9      ┌──────────────────┐   丢弃    ┌──────────────┐
-│ 元数据获取  │────────────►│ 过滤引擎          │─────────►│ 成人/垃圾/过小 │
-│ (workers)  │             │ (关键词+启发式+体积)│           └──────────────┘
-└─────┬──────┘             └────────┬─────────┘
-      ▼                             ▼ 通过
-┌────────────┐   REST API   ┌─────────────┐
-│   SQLite   │◄────────────►│  Next.js 前端│
-└─────┬──────┘              └─────────────┘
-      │ 每小时增量复审
-      ▼
-┌──────────────────┐   命中    ┌────────────────────┐
-│ LLM 审核          │─────────►│ 删除 + 写入 blocked │
-│ (OpenRouter 免费模型)│         └────────────────────┘
-└──────────────────┘
+```mermaid
+flowchart TB
+    DHT["公共 BitTorrent DHT 节点"]
+    Crawler["DHT 爬虫<br/>被动收听 + BEP-51 主动采样"]
+    Scraper["Tracker 刮削排序<br/>BEP 15 批量 scrape"]
+    Fetcher["元数据获取<br/>BEP-9 workers"]
+    Filter{"过滤引擎<br/>关键词 + 启发式 + 体积"}
+    Discard["丢弃并计数<br/>成人 / 垃圾 / 过小"]
+    DB[("SQLite")]
+    Web["Next.js 前端"]
+    Mod["LLM 审核<br/>OpenRouter 免费模型"]
+    Blocked[("blocked 表")]
+
+    Crawler <-->|UDP| DHT
+    Crawler -->|新 infohash| Scraper
+    Scraper -->|按 seeder 数排序| Fetcher
+    Fetcher --> Filter
+    Filter -->|命中| Discard
+    Filter -->|通过| DB
+    Web <-->|REST API| DB
+    DB -->|每小时增量送审| Mod
+    Mod -->|判定成人/垃圾 → 删除| Blocked
+    Mod -->|标题去广告 clean_name| DB
+    Blocked -.->|入库时拒绝，防复活| DB
 ```
 
 - `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、SQLite 存储（modernc.org/sqlite，无 cgo）、REST API（标准库 net/http）
