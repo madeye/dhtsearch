@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,16 +35,22 @@ type Config struct {
 	Timeout time.Duration
 	// MaxFiles caps how many file entries are kept per torrent.
 	MaxFiles int
+	// Trackers are announce URLs appended to every magnet. Tracker announces
+	// return a peer list in one round trip, where a DHT get_peers walk can
+	// eat most of the fetch timeout — for well-tracked (popular) content
+	// this is the difference between fetching and timing out.
+	Trackers []string
 	// Logger, nil for log.Default().
 	Logger *log.Logger
 }
 
 // Fetcher consumes infohashes and reports successfully fetched metadata.
 type Fetcher struct {
-	cfg    Config
-	client *torrent.Client
-	tmpDir string
-	logger *log.Logger
+	cfg          Config
+	client       *torrent.Client
+	tmpDir       string
+	logger       *log.Logger
+	magnetSuffix string // pre-encoded &tr=... params, possibly empty
 
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
@@ -86,7 +94,27 @@ func NewFetcher(cfg Config) (*Fetcher, error) {
 		os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("torrent client: %w", err)
 	}
-	return &Fetcher{cfg: cfg, client: client, tmpDir: tmpDir, logger: logger}, nil
+	return &Fetcher{
+		cfg:          cfg,
+		client:       client,
+		tmpDir:       tmpDir,
+		logger:       logger,
+		magnetSuffix: magnetTrackerParams(cfg.Trackers),
+	}, nil
+}
+
+// magnetTrackerParams encodes announce URLs as magnet &tr= parameters.
+func magnetTrackerParams(trackers []string) string {
+	var b strings.Builder
+	for _, tr := range trackers {
+		tr = strings.TrimSpace(tr)
+		if tr == "" {
+			continue
+		}
+		b.WriteString("&tr=")
+		b.WriteString(url.QueryEscape(tr))
+	}
+	return b.String()
 }
 
 // Run starts the worker pool consuming hex infohashes from in until in is
@@ -129,7 +157,7 @@ func (f *Fetcher) fetch(ctx context.Context, hexHash string) (Record, bool) {
 		f.count(&f.failed)
 		return rec, false
 	}
-	t, err := f.client.AddMagnet("magnet:?xt=urn:btih:" + hexHash)
+	t, err := f.client.AddMagnet("magnet:?xt=urn:btih:" + hexHash + f.magnetSuffix)
 	if err != nil {
 		f.count(&f.failed)
 		return rec, false

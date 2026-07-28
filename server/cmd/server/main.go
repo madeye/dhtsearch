@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,8 +20,17 @@ import (
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/metadata"
 	"dhtsearch/server/internal/moderator"
+	"dhtsearch/server/internal/scraper"
 	"dhtsearch/server/internal/store"
 )
+
+// defaultTrackers are large, long-lived open trackers. They serve both
+// pipeline roles (scrape ranking and magnet peer hints); the list is
+// overridable via TRACKERS for when one of them inevitably goes away.
+const defaultTrackers = "udp://tracker.opentrackr.org:1337/announce," +
+	"udp://open.demonii.com:1337/announce," +
+	"udp://tracker.torrent.eu.org:451/announce," +
+	"udp://exodus.desync.com:6969/announce"
 
 // envDefault returns the env value or fallback.
 func envDefault(key, fallback string) string {
@@ -57,6 +67,37 @@ func envInt64(key string, fallback int64) int64 {
 	return fallback
 }
 
+// splitCSV splits a comma-separated list, trimming whitespace and dropping
+// empty entries.
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// scraperStatus adapts the scraper's stats for the API; nil scraper (scrape
+// disabled, crawler off, or bare-infohash mode) means no stats section.
+func scraperStatus(scr *scraper.Scraper) func() api.ScraperStatus {
+	if scr == nil {
+		return nil
+	}
+	return func() api.ScraperStatus {
+		ss := scr.Stats()
+		return api.ScraperStatus{
+			Queue:      ss.QueueLen,
+			Scraped:    ss.Scraped,
+			Seeded:     ss.Seeded,
+			ScrapeErrs: ss.ScrapeErrs,
+			Dropped:    ss.Dropped,
+			Evicted:    ss.Evicted,
+		}
+	}
+}
+
 func envFloat(key string, fallback float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -84,6 +125,10 @@ func main() {
 	metaWorkers := flag.Int("meta-workers", envInt("META_WORKERS", 128), "metadata fetch worker count")
 	metaTimeout := flag.Duration("meta-timeout", envDuration("META_TIMEOUT", 45*time.Second), "metadata fetch timeout per torrent")
 	fetchMetadata := flag.Bool("fetch-metadata", envBool("FETCH_METADATA", true), "fetch torrent metadata (false: store bare infohashes)")
+	trackersCSV := flag.String("trackers", envDefault("TRACKERS", defaultTrackers),
+		"comma-separated tracker announce URLs, used both to rank discovered infohashes (BEP 15 scrape) and as peer hints on fetch magnets (empty = neither)")
+	scrapeEnabled := flag.Bool("scrape", envBool("SCRAPE_ENABLED", true),
+		"rank discovered infohashes by tracker-scraped seeder count before fetching")
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
@@ -144,20 +189,38 @@ func main() {
 	}
 	defer cr.Close()
 
-	// Pipeline: infohashes -> metadata -> filter -> store.
+	trackerList := splitCSV(*trackersCSV)
+
+	// Pipeline: infohashes -> scrape ranking -> metadata -> filter -> store.
 	var fetcher *metadata.Fetcher
+	var scr *scraper.Scraper
 	if *fetchMetadata {
 		var err error
 		fetcher, err = metadata.NewFetcher(metadata.Config{
-			Workers: *metaWorkers,
-			Timeout: *metaTimeout,
-			Logger:  logger,
+			Workers:  *metaWorkers,
+			Timeout:  *metaTimeout,
+			Trackers: trackerList,
+			Logger:   logger,
 		})
 		if err != nil {
 			logger.Fatalf("metadata: %v", err)
 		}
 		defer fetcher.Close()
-		fetcher.Run(ctx, cr.Infohashes(), func(rec metadata.Record) {
+		feed := cr.Infohashes()
+		if *scrapeEnabled && len(trackerList) > 0 && feed != nil {
+			scr, err = scraper.New(scraper.Config{
+				Trackers: trackerList,
+				Logger:   logger,
+			})
+			if err != nil {
+				logger.Printf("scraper: disabled: %v", err)
+			} else {
+				defer scr.Close()
+				scr.Run(ctx, feed)
+				feed = scr.Out()
+			}
+		}
+		fetcher.Run(ctx, feed, func(rec metadata.Record) {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
 			if res.Adult {
 				st.IncrStat("adult_filtered", 1)
@@ -269,6 +332,7 @@ func main() {
 			RateBurst:     *rateBurst,
 			MaxInflight:   *searchInflight,
 			SearchTimeout: *searchTimeout,
+			ScraperStatus: scraperStatus(scr),
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
