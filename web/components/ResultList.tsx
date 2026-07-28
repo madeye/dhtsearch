@@ -55,27 +55,41 @@ export default function ResultList({ results }: { results: SearchResult[] }) {
       </div>
 
       {selected.size > 0 && (
-        <div className="fixed inset-x-0 bottom-4 z-10 px-4">
-          <div className="mx-auto flex w-full max-w-3xl items-center justify-between gap-3 rounded-lg border border-zinc-700 bg-zinc-900/95 px-4 py-3 shadow-lg shadow-black/40 backdrop-blur">
-            <span className="text-sm text-zinc-300">
+        // Sticky, not fixed: the bar rides the viewport bottom while the list
+        // scrolls, but settles into the flow at the end of the list, so it can
+        // never cover the last card, the pagination, or the footer.
+        <div className="sticky bottom-4 z-10 mt-3">
+          <div className="flex w-full items-center justify-between gap-2 rounded-lg border border-zinc-700 bg-zinc-900/95 px-3 py-2.5 shadow-lg shadow-black/40 backdrop-blur sm:px-4 sm:py-3">
+            <span className="shrink-0 text-sm text-zinc-300">
               已选 <span className="font-medium text-emerald-400">{selected.size}</span> 条
             </span>
             <div className="flex items-center gap-2">
+              {/* Phones get shorter labels and taller (easier-to-tap) buttons. */}
               <button
                 onClick={toggleAll}
-                className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-emerald-600 hover:text-emerald-400"
+                className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs font-medium text-zinc-300 transition-colors hover:border-emerald-600 hover:text-emerald-400 sm:py-1.5"
               >
-                {allSelected ? "取消全选" : "全选本页"}
+                <span className="sm:hidden">{allSelected ? "取消" : "全选"}</span>
+                <span className="hidden sm:inline">
+                  {allSelected ? "取消全选" : "全选本页"}
+                </span>
               </button>
               <button
                 onClick={copySelected}
-                className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors sm:py-1.5 ${
                   copied
                     ? "border-emerald-600 bg-emerald-600/20 text-emerald-400"
                     : "border-emerald-700 bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20"
                 }`}
               >
-                {copied ? "✓ 已复制" : "复制磁力链接"}
+                {copied ? (
+                  "✓ 已复制"
+                ) : (
+                  <>
+                    <span className="sm:hidden">复制链接</span>
+                    <span className="hidden sm:inline">复制磁力链接</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

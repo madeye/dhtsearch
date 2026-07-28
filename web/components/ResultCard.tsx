@@ -43,15 +43,19 @@ export default function ResultCard({
       }`}
     >
       <div className="flex items-start justify-between gap-3">
-        {/* Native checkbox for free keyboard/screen-reader semantics; mt-1
-            lines it up with the first line of the title. */}
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={onToggleSelect}
-          aria-label={`选择 ${result.name || "(未命名)"}`}
-          className="mt-1 h-4 w-4 shrink-0 cursor-pointer accent-emerald-500"
-        />
+        {/* Native checkbox for free keyboard/screen-reader semantics. The
+            label's padding (undone by negative margins so layout is unchanged)
+            grows the tap target to ~36px for touch; -mt-1 + p-2 nets out to
+            the mt-1 that aligns the box with the title's first line. */}
+        <label className="-m-2 -mt-1 shrink-0 cursor-pointer p-2">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggleSelect}
+            aria-label={`选择 ${result.name || "(未命名)"}`}
+            className="block h-5 w-5 cursor-pointer accent-emerald-500 sm:h-4 sm:w-4"
+          />
+        </label>
         <button
           onClick={() => setExpanded((v) => !v)}
           className="min-w-0 flex-1 text-left"
