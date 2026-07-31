@@ -309,7 +309,12 @@ func main() {
 		go svc.Run(ctx)
 		trendFn = func() api.Trending {
 			snap := svc.Get()
-			t := api.Trending{Movies: snap.Movies, TV: snap.TV}
+			t := api.Trending{
+				Movies: snap.Movies,
+				TV:     snap.TV,
+				TVJP:   snap.TVJP,
+				TVKR:   snap.TVKR,
+			}
 			if !snap.UpdatedAt.IsZero() {
 				t.UpdatedAt = snap.UpdatedAt.Unix()
 			}

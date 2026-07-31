@@ -23,8 +23,12 @@ function TrendingRow({ label, titles }: { label: string; titles: string[] }) {
 
 export default async function Home() {
   const [stats, trending] = await Promise.all([fetchStats(), fetchTrending()]);
-  const movies = trending?.movies ?? [];
-  const tv = trending?.tv ?? [];
+  const rows = [
+    { label: "热门电影", titles: trending?.movies ?? [] },
+    { label: "热门美剧", titles: trending?.tv ?? [] },
+    { label: "热门日剧", titles: trending?.tv_jp ?? [] },
+    { label: "热门韩剧", titles: trending?.tv_kr ?? [] },
+  ].filter((r) => r.titles.length > 0);
 
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-4 py-16">
@@ -47,10 +51,11 @@ export default async function Home() {
           直接输入关键词搜索，留空则浏览最新收录的资源
         </p>
 
-        {(movies.length > 0 || tv.length > 0) && (
+        {rows.length > 0 && (
           <div className="mt-8">
-            {movies.length > 0 && <TrendingRow label="热门电影" titles={movies} />}
-            {tv.length > 0 && <TrendingRow label="热门剧集" titles={tv} />}
+            {rows.map((r) => (
+              <TrendingRow key={r.label} label={r.label} titles={r.titles} />
+            ))}
             <p className="mt-2 text-center text-[10px] text-zinc-600">
               热门影视数据来自豆瓣
             </p>
