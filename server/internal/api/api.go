@@ -94,12 +94,16 @@ type Server struct {
 	// Cached /api/stats body and empty-query total, both refreshed at most
 	// once per StatsTTL. The mutexes double as single-flight: one request
 	// pays for the refresh while the rest wait for its result.
-	statsMu   sync.Mutex
-	statsBody []byte
-	statsAt   time.Time
-	countMu   sync.Mutex
-	countVal  int
-	countAt   time.Time
+	statsMu    sync.Mutex
+	statsBody  []byte
+	statsAt    time.Time
+	countMu    sync.Mutex
+	countCache map[store.SearchFilter]cachedCount
+}
+
+type cachedCount struct {
+	value int
+	at    time.Time
 }
 
 // New builds the HTTP handler. crawlerStatus may be nil.
@@ -117,11 +121,12 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 		opts.StatsTTL = defaultStatsTTL
 	}
 	s := &Server{
-		st:        st,
-		crawler:   crawlerStatus,
-		logger:    logger,
-		opts:      opts,
-		searchSem: make(chan struct{}, opts.MaxInflight),
+		st:         st,
+		crawler:    crawlerStatus,
+		logger:     logger,
+		opts:       opts,
+		searchSem:  make(chan struct{}, opts.MaxInflight),
+		countCache: make(map[store.SearchFilter]cachedCount),
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst
@@ -162,6 +167,8 @@ func (s *Server) Handler() http.Handler {
 type resultItem struct {
 	InfoHash  string `json:"info_hash"`
 	Name      string `json:"name"`
+	Category  string `json:"category"`
+	IsAdult   bool   `json:"is_adult"`
 	TotalSize int64  `json:"total_size"`
 	FileCount int    `json:"file_count"`
 	Files     any    `json:"files"`
@@ -184,6 +191,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if (page-1)*pageSize > maxOffset {
 		page = maxOffset/pageSize + 1
+	}
+	filter, ok := parseSearchFilter(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid content filter")
+		return
 	}
 
 	// Admission gate: the store serializes queries on one connection, so
@@ -213,12 +225,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(q) == "" {
 		// The landing page. Latest walks the created_at index instead of
 		// counting matches, and the total comes from the shared cache.
-		items, err = s.st.Latest(ctx, page, pageSize)
+		items, err = s.st.Latest(ctx, page, pageSize, filter)
 		if err == nil {
-			total, err = s.cachedCount(ctx)
+			total, err = s.cachedCount(ctx, filter)
 		}
 	} else {
-		items, total, err = s.st.Search(ctx, q, page, pageSize)
+		items, total, err = s.st.Search(ctx, q, page, pageSize, filter)
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -235,6 +247,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		results = append(results, resultItem{
 			InfoHash:  t.InfoHash,
 			Name:      t.Name,
+			Category:  t.Category,
+			IsAdult:   t.Category == store.CategoryAdult,
 			TotalSize: t.TotalSize,
 			FileCount: t.FileCount,
 			Files:     t.Files,
@@ -250,21 +264,42 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func parseSearchFilter(r *http.Request) (store.SearchFilter, bool) {
+	filter := store.SearchFilter{}
+	if raw := r.URL.Query().Get("include_adult"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return filter, false
+		}
+		filter.IncludeAdult = value
+	}
+	switch category := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("category"))); category {
+	case "":
+	case "all":
+		filter.IncludeAdult = true
+	case store.CategoryGeneral, store.CategoryAdult, store.CategorySpam:
+		filter.Category = category
+	default:
+		return filter, false
+	}
+	return filter, true
+}
+
 // cachedCount returns the total torrent count, at most StatsTTL stale.
 // COUNT(*) walks a full index, so the landing page must not pay for it per
 // request. The lock is held across the query on purpose: it makes concurrent
 // misses single-flight.
-func (s *Server) cachedCount(ctx context.Context) (int, error) {
+func (s *Server) cachedCount(ctx context.Context, filter store.SearchFilter) (int, error) {
 	s.countMu.Lock()
 	defer s.countMu.Unlock()
-	if !s.countAt.IsZero() && time.Since(s.countAt) < s.opts.StatsTTL {
-		return s.countVal, nil
+	if cached, ok := s.countCache[filter]; ok && time.Since(cached.at) < s.opts.StatsTTL {
+		return cached.value, nil
 	}
-	n, err := s.st.Count(ctx)
+	n, err := s.st.CountSearchable(ctx, filter)
 	if err != nil {
 		return 0, err
 	}
-	s.countVal, s.countAt = n, time.Now()
+	s.countCache[filter] = cachedCount{value: n, at: time.Now()}
 	return n, nil
 }
 
@@ -302,13 +337,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "stats failed")
 		return
 	}
+	categories, err := s.st.CategoryCounts(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stats failed")
+		return
+	}
 	resp := map[string]any{
-		"torrents":       total,
-		"seen":           counters["seen"],
-		"fetched":        counters["fetched"],
-		"adult_filtered": counters["adult_filtered"],
-		"spam_filtered":  counters["spam_filtered"],
-		"size_filtered":  counters["size_filtered"],
+		"torrents":         total,
+		"seen":             counters["seen"],
+		"fetched":          counters["fetched"],
+		"adult_classified": categories[store.CategoryAdult],
+		"spam_filtered":    counters["spam_filtered"],
+		"size_filtered":    counters["size_filtered"],
+		"categories":       categories,
 		// Metadata fetch outcomes. A timeout share near 100% means the
 		// fetch pool, not discovery, is what caps indexing throughput.
 		"fetch": map[string]any{
@@ -317,12 +358,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"failed":    counters["meta_failed"],
 		},
 		"moderation": map[string]any{
-			"reviewed":      counters["llm_reviewed"],
-			"adult_removed": counters["llm_adult_removed"],
-			"spam_removed":  counters["llm_spam_removed"],
-			"errors":        counters["llm_errors"],
-			"pending":       pending,
-			"blocked":       blocked,
+			"reviewed":         counters["llm_reviewed"],
+			"adult_classified": counters["llm_adult_classified"],
+			"spam_classified":  counters["llm_spam_classified"],
+			"errors":           counters["llm_errors"],
+			"pending":          pending,
+			"blocked":          blocked,
 		},
 	}
 	if s.crawler != nil {

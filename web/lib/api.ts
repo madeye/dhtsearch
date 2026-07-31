@@ -33,12 +33,16 @@ export interface TorrentFile {
 export interface SearchResult {
   info_hash: string;
   name: string;
+  category: string;
+  is_adult: boolean;
   total_size: number;
   file_count: number;
   files?: TorrentFile[];
   magnet: string;
   created_at: number;
 }
+
+export type ContentFilter = "safe" | "all" | "adult";
 
 export interface SearchResponse {
   total: number;
@@ -51,21 +55,24 @@ export interface StatsResponse {
   torrents?: number;
   seen?: number;
   fetched?: number;
-  adult_filtered?: number;
+  adult_classified?: number;
   spam_filtered?: number;
   crawler_running?: boolean;
 }
 
 export async function fetchSearch(
-  q: string,
-  page: number,
-  pageSize = 20
+	q: string,
+	page: number,
+	pageSize = 20,
+	contentFilter: ContentFilter = "safe",
 ): Promise<SearchResponse> {
   const params = new URLSearchParams({
     q,
     page: String(page),
     page_size: String(pageSize),
   });
+  if (contentFilter === "all") params.set("include_adult", "true");
+  if (contentFilter === "adult") params.set("category", "adult");
   const res = await fetch(`${API_BASE}/api/search?${params.toString()}`, {
     cache: "no-store",
     headers: await clientIPHeaders(),

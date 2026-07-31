@@ -2,18 +2,24 @@
 
 import Link from "next/link";
 import type { MouseEvent } from "react";
+import type { ContentFilter } from "@/lib/api";
 
 interface PaginationProps {
   q: string;
   page: number;
   total: number;
   pageSize: number;
+  contentFilter?: ContentFilter;
 }
 
-export default function Pagination({ q, page, total, pageSize }: PaginationProps) {
+export default function Pagination({ q, page, total, pageSize, contentFilter = "safe" }: PaginationProps) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const mkHref = (p: number) =>
-    `/search?q=${encodeURIComponent(q)}&page=${p}`;
+  const mkHref = (p: number) => {
+    const params = new URLSearchParams({ q, page: String(p) });
+    if (contentFilter === "all") params.set("include_adult", "true");
+    if (contentFilter === "adult") params.set("category", "adult");
+    return `/search?${params.toString()}`;
+  };
 
   const btnCls =
     "rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-emerald-600 hover:text-emerald-400";

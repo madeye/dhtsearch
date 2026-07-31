@@ -15,7 +15,7 @@ export default async function Home() {
           干净、无广告的磁力链接搜索引擎
           <br className="sm:hidden" />
           <span className="hidden sm:inline"> · </span>
-          基于 DHT 网络实时收录，自动过滤成人内容与垃圾信息
+		  基于 DHT 网络实时收录，成人内容默认隐藏、可按需查看
         </p>
 
         <div className="mt-10">
@@ -30,8 +30,8 @@ export default async function Home() {
       <footer className="mt-16 text-center text-xs text-zinc-500">
         {stats ? (
           <p>
-            已收录 {formatCount(stats.torrents)} 条 · 已过滤成人内容{" "}
-            {formatCount(stats.adult_filtered)} 条 · 垃圾信息{" "}
+			已收录 {formatCount(stats.torrents)} 条 · 已分类成人内容{" "}
+			{formatCount(stats.adult_classified)} 条 · 已过滤垃圾信息{" "}
             {formatCount(stats.spam_filtered)} 条
             {stats.crawler_running === false && (
               <span className="ml-2 text-amber-500">（爬虫暂停中）</span>

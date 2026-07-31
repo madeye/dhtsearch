@@ -222,10 +222,6 @@ func main() {
 		}
 		fetcher.Run(ctx, feed, func(rec metadata.Record) {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
-			if res.Adult {
-				st.IncrStat("adult_filtered", 1)
-				return
-			}
 			if res.Spam {
 				st.IncrStat("spam_filtered", 1)
 				return
@@ -234,16 +230,25 @@ func main() {
 				st.IncrStat("size_filtered", 1)
 				return
 			}
-			if err := st.Upsert(store.Torrent{
+			torrent := store.Torrent{
 				InfoHash:  rec.InfoHash,
 				Name:      rec.Name,
 				TotalSize: rec.TotalSize,
 				FileCount: rec.FileCount,
 				Files:     rec.Files,
 				CreatedAt: time.Now().Unix(),
-			}); err != nil {
+			}
+			if res.Adult {
+				torrent.Category = store.CategoryAdult
+				torrent.CategoryConfidence = 1
+				torrent.CategoryReason = strings.Join(res.Reasons, "; ")
+			}
+			if err := st.Upsert(torrent); err != nil {
 				logger.Printf("store upsert: %v", err)
 				return
+			}
+			if res.Adult {
+				st.IncrStat("adult_classified", 1)
 			}
 			st.IncrStat("fetched", 1)
 		})

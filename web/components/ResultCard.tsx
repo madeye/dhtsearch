@@ -73,6 +73,9 @@ export default function ResultCard({
             {result.name || "(未命名)"}
           </h3>
           <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
+			{result.is_adult && (
+			  <span className="rounded bg-rose-950/70 px-1.5 text-rose-300">成人内容</span>
+			)}
             <span>{formatSize(result.total_size)}</span>
             <span>{formatCount(totalFiles)} 个文件</span>
             <span>收录于 {formatRelativeTime(result.created_at)}</span>

@@ -1,13 +1,15 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import type { ContentFilter } from "@/lib/api";
 
 interface SearchBoxProps {
   initialQuery?: string;
   large?: boolean;
+  contentFilter?: ContentFilter;
 }
 
-export default function SearchBox({ initialQuery = "", large = false }: SearchBoxProps) {
+export default function SearchBox({ initialQuery = "", large = false, contentFilter = "safe" }: SearchBoxProps) {
   const [q, setQ] = useState(initialQuery);
 
   function onSubmit(e: FormEvent) {
@@ -17,9 +19,12 @@ export default function SearchBox({ initialQuery = "", large = false }: SearchBo
     // A client-side router fetch cannot display that HTML challenge, so make
     // search a document navigation and let Cloudflare complete its normal
     // challenge -> cf_clearance -> page flow.
-    window.location.assign(
-      query ? `/search?q=${encodeURIComponent(query)}` : "/search",
-    );
+    const params = new URLSearchParams();
+    if (query) params.set("q", query);
+    if (contentFilter === "all") params.set("include_adult", "true");
+    if (contentFilter === "adult") params.set("category", "adult");
+    const suffix = params.toString();
+    window.location.assign(suffix ? `/search?${suffix}` : "/search");
   }
 
   return (

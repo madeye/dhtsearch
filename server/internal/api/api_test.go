@@ -105,6 +105,59 @@ func TestSearchClampsDeepPagination(t *testing.T) {
 	}
 }
 
+func TestSearchContentFilters(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	for _, torrent := range []store.Torrent{
+		{InfoHash: "safe", Name: "safe movie", TotalSize: 1, CreatedAt: 100},
+		{InfoHash: "adult", Name: "adult movie", Category: store.CategoryAdult, TotalSize: 1, CreatedAt: 200},
+	} {
+		if err := st.Upsert(torrent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Classify([]store.Classification{{
+		InfoHash: "safe", Category: store.CategorySpam, Confidence: 0.9, Reason: "test",
+	}}, 300); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Upsert(store.Torrent{InfoHash: "general", Name: "general movie", TotalSize: 1, CreatedAt: 300}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(st, nil, nil, Options{}).Handler())
+	t.Cleanup(srv.Close)
+
+	if got := getJSON(t, srv.URL+"/api/search?q=")["total"].(float64); got != 1 {
+		t.Fatalf("safe total=%v, want 1", got)
+	}
+	if got := getJSON(t, srv.URL+"/api/search?q=&include_adult=true")["total"].(float64); got != 2 {
+		t.Fatalf("include-adult total=%v, want 2", got)
+	}
+	adult := getJSON(t, srv.URL+"/api/search?q=&category=adult")
+	if got := adult["total"].(float64); got != 1 {
+		t.Fatalf("adult total=%v, want 1", got)
+	}
+	result := adult["results"].([]any)[0].(map[string]any)
+	if result["category"] != "adult" || result["is_adult"] != true {
+		t.Fatalf("adult result=%v", result)
+	}
+	if got := getJSON(t, srv.URL+"/api/search?q=&category=spam")["total"].(float64); got != 1 {
+		t.Fatalf("spam total=%v, want 1", got)
+	}
+
+	resp, err := http.Get(srv.URL + "/api/search?include_adult=perhaps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid filter status=%d, want 400", resp.StatusCode)
+	}
+}
+
 func TestStats(t *testing.T) {
 	m := getJSON(t, testServer(t).URL+"/api/stats")
 	if m["torrents"].(float64) != 3 {

@@ -1,10 +1,9 @@
 // Package moderator periodically re-checks indexed torrents with an
-// OpenAI-compatible chat model and removes adult and spam listings that the
-// static keyword filter let through.
+// OpenAI-compatible chat model and classifies adult and spam listings without
+// deleting them.
 //
 // The pass is incremental: every torrent carries a reviewed_at stamp, so each
-// run only pays for rows it has never classified. Removed infohashes go on a
-// blocklist so the crawler cannot re-add them.
+// run only pays for rows it has never classified.
 package moderator
 
 import (
@@ -38,7 +37,7 @@ type Config struct {
 	BatchSize  int           // titles per request
 	MaxBatches int           // batches per sweep; 0 = unlimited
 	Timeout    time.Duration // per-request timeout
-	DryRun     bool          // classify and log, but delete nothing
+	DryRun     bool          // classify and log, but persist nothing
 	TrimTitles bool          // also strip advertising from titles
 	Logger     *log.Logger
 	HTTPClient *http.Client // optional; for tests
@@ -53,11 +52,11 @@ type Moderator struct {
 
 // Summary reports what a single sweep did.
 type Summary struct {
-	Reviewed int
-	Adult    int
-	Spam     int
-	Deleted  int64
-	Trimmed  int64
+	Reviewed   int
+	Adult      int
+	Spam       int
+	Classified int64
+	Trimmed    int64
 }
 
 // New validates cfg and builds a Moderator.
@@ -111,8 +110,8 @@ func (m *Moderator) Run(ctx context.Context) {
 				continue
 			}
 			if s.Reviewed > 0 {
-				m.cfg.Logger.Printf("moderator: reviewed=%d adult=%d spam=%d deleted=%d trimmed=%d",
-					s.Reviewed, s.Adult, s.Spam, s.Deleted, s.Trimmed)
+				m.cfg.Logger.Printf("moderator: reviewed=%d adult=%d spam=%d classified=%d trimmed=%d",
+					s.Reviewed, s.Adult, s.Spam, s.Classified, s.Trimmed)
 			}
 		}
 	}
@@ -134,10 +133,13 @@ func (m *Moderator) SweepOnce(ctx context.Context) (Summary, error) {
 		total.Reviewed += s.Reviewed
 		total.Adult += s.Adult
 		total.Spam += s.Spam
-		total.Deleted += s.Deleted
+		total.Classified += s.Classified
 		total.Trimmed += s.Trimmed
 		if err != nil {
 			return total, err
+		}
+		if m.cfg.DryRun {
+			return total, nil
 		}
 	}
 	return total, nil
@@ -154,11 +156,15 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 	now := time.Now().Unix()
 	var adultH, adultN, spamH, spamN []string
 	trims := map[string]string{}
+	classifications := make([]store.Classification, 0, len(cands))
 	for i, c := range cands {
+		category := store.CategoryGeneral
 		switch verdicts[i].label {
 		case labelAdult:
+			category = store.CategoryAdult
 			adultH, adultN = append(adultH, c.InfoHash), append(adultN, c.Name)
 		case labelSpam:
+			category = store.CategorySpam
 			spamH, spamN = append(spamH, c.InfoHash), append(spamN, c.Name)
 		default:
 			// Only worth trimming titles that survive moderation.
@@ -166,6 +172,10 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 				trims[c.InfoHash] = v
 			}
 		}
+		classifications = append(classifications, store.Classification{
+			InfoHash: c.InfoHash, Category: category,
+			Confidence: verdicts[i].confidence, Reason: verdicts[i].reason,
+		})
 	}
 	s.Reviewed, s.Adult, s.Spam = len(cands), len(adultH), len(spamH)
 
@@ -181,47 +191,31 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 
 	if m.cfg.DryRun {
 		for i, h := range adultH {
-			m.cfg.Logger.Printf("moderator: [dry-run] would remove adult %s %q", h, adultN[i])
+			m.cfg.Logger.Printf("moderator: [dry-run] would classify adult %s %q", h, adultN[i])
 		}
 		for i, h := range spamH {
-			m.cfg.Logger.Printf("moderator: [dry-run] would remove spam %s %q", h, spamN[i])
+			m.cfg.Logger.Printf("moderator: [dry-run] would classify spam %s %q", h, spamN[i])
 		}
-	} else {
-		n, err := m.st.SetCleanNames(trims)
-		if err != nil {
-			return s, fmt.Errorf("set clean names: %w", err)
-		}
-		s.Trimmed = n
-		m.st.IncrStat("llm_titles_trimmed", n)
-		for _, g := range []struct {
-			hashes, names []string
-			reason, stat  string
-		}{
-			{adultH, adultN, labelAdult, "llm_adult_removed"},
-			{spamH, spamN, labelSpam, "llm_spam_removed"},
-		} {
-			if len(g.hashes) == 0 {
-				continue
-			}
-			n, err := m.st.Block(g.hashes, g.names, g.reason, now)
-			if err != nil {
-				return s, fmt.Errorf("block %s: %w", g.reason, err)
-			}
-			s.Deleted += n
-			m.st.IncrStat(g.stat, n)
-			for i, h := range g.hashes {
-				m.cfg.Logger.Printf("moderator: removed %s %s %q", g.reason, h, g.names[i])
-			}
-		}
+		return s, nil
 	}
 
-	// Mark the whole batch reviewed. Rows just deleted simply match nothing.
-	hashes := make([]string, len(cands))
-	for i, c := range cands {
-		hashes[i] = c.InfoHash
+	n, err := m.st.SetCleanNames(trims)
+	if err != nil {
+		return s, fmt.Errorf("set clean names: %w", err)
 	}
-	if err := m.st.MarkReviewed(hashes, now); err != nil {
-		return s, fmt.Errorf("mark reviewed: %w", err)
+	s.Trimmed = n
+	m.st.IncrStat("llm_titles_trimmed", n)
+	if err := m.st.Classify(classifications, now); err != nil {
+		return s, fmt.Errorf("store classifications: %w", err)
+	}
+	s.Classified = int64(len(classifications))
+	m.st.IncrStat("llm_adult_classified", int64(len(adultH)))
+	m.st.IncrStat("llm_spam_classified", int64(len(spamH)))
+	for i, h := range adultH {
+		m.cfg.Logger.Printf("moderator: classified adult %s %q", h, adultN[i])
+	}
+	for i, h := range spamH {
+		m.cfg.Logger.Printf("moderator: classified spam %s %q", h, spamN[i])
 	}
 	m.st.IncrStat("llm_reviewed", int64(len(cands)))
 	return s, nil
@@ -231,10 +225,10 @@ func (m *Moderator) reviewBatch(ctx context.Context, cands []store.Candidate) (S
 // entirely when the feature is off, so it costs no tokens.
 func systemPromptFor(trim bool) string {
 	if trim {
-		return promptHead + "For each one, assign a label and return a cleaned-up title.\n" +
+		return promptHead + "For each one, assign a category and return a cleaned-up title.\n" +
 			promptLabel + promptClean + promptTailTrim
 	}
-	return promptHead + "Assign each one a label.\n" + promptLabel + promptTail
+	return promptHead + "Assign each one a category.\n" + promptLabel + promptTail
 }
 
 const promptHead = `You are a content-moderation classifier for a BitTorrent metadata index.
@@ -243,7 +237,7 @@ You receive a JSON array of torrent listings, each with "i" (its number),
 context. `
 
 const promptLabel = `
-LABEL — assign each listing exactly one:
+CATEGORY — assign each listing exactly one:
 
 - "adult": pornography or sexually explicit material (including JAV, hentai,
   camgirl/webcam rips, escort or sex-work advertising).
@@ -289,19 +283,21 @@ string, and never delete so much that the work is no longer identifiable.
 
 const promptTailTrim = `
 Respond with JSON only, no prose, in exactly this shape:
-{"verdicts":[{"i":1,"label":"ok","clean":"cleaned title"},{"i":2,"label":"adult","clean":"cleaned title"}]}
+{"verdicts":[{"i":1,"category":"ok","confidence":0.98,"reason":"brief reason","clean":"cleaned title"},{"i":2,"category":"adult","confidence":0.95,"reason":"brief reason","clean":"cleaned title"}]}
 Include exactly one entry for every input number.`
 
 const promptTail = `
 Respond with JSON only, no prose, in exactly this shape:
-{"verdicts":[{"i":1,"label":"ok"},{"i":2,"label":"adult"}]}
+{"verdicts":[{"i":1,"category":"ok","confidence":0.98,"reason":"brief reason"},{"i":2,"category":"adult","confidence":0.95,"reason":"brief reason"}]}
 Include exactly one entry for every input number.`
 
 // verdict is the model's answer for one candidate. clean is empty unless the
 // model proposed a trimmed title that passed validation.
 type verdict struct {
-	label string
-	clean string
+	label      string
+	clean      string
+	confidence float64
+	reason     string
 }
 
 // classify returns a verdict per candidate, aligned by index. Entries the model
@@ -350,12 +346,18 @@ func (m *Moderator) classify(ctx context.Context, cands []store.Candidate) ([]ve
 		if v.I < 1 || v.I > len(cands) {
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(v.Label)) {
+		category := v.Category
+		if category == "" {
+			category = v.Label // tolerate the previous response shape
+		}
+		switch strings.ToLower(strings.TrimSpace(category)) {
 		case labelAdult:
 			out[v.I-1].label = labelAdult
 		case labelSpam:
 			out[v.I-1].label = labelSpam
 		}
+		out[v.I-1].confidence = v.Confidence
+		out[v.I-1].reason = strings.TrimSpace(v.Reason)
 		if m.cfg.TrimTitles {
 			out[v.I-1].clean = cleanTitle(cands[v.I-1].Name, v.Clean)
 		}
@@ -556,8 +558,11 @@ type promptItem struct {
 
 type verdictResponse struct {
 	Verdicts []struct {
-		I     int    `json:"i"`
-		Label string `json:"label"`
-		Clean string `json:"clean"`
+		I          int     `json:"i"`
+		Category   string  `json:"category"`
+		Label      string  `json:"label"`
+		Confidence float64 `json:"confidence"`
+		Reason     string  `json:"reason"`
+		Clean      string  `json:"clean"`
 	} `json:"verdicts"`
 }

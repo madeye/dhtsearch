@@ -4,7 +4,7 @@
 
 > Co-authored by [Kimi K3](https://www.kimi.com/).
 
-一个自建索引的磁力链接搜索网站：Go 后端通过 DHT 网络爬虫实时采集磁力链接元数据，自动过滤成人内容与垃圾信息，Next.js 前端提供干净的搜索界面。
+一个自建索引的磁力链接搜索网站：Go 后端通过 DHT 网络爬虫实时采集磁力链接元数据，分类并默认隐藏成人内容，过滤垃圾信息，Next.js 前端提供可控的搜索界面。
 
 ## 架构
 
@@ -15,23 +15,26 @@ flowchart TB
     Scraper["Tracker scrape ranking<br/>BEP 15 batch scrape"]
     Fetcher["Metadata fetch<br/>BEP-9 workers"]
     Filter{"Filter engine<br/>keywords + heuristics + size"}
-    Discard["Drop and count<br/>adult / spam / too small"]
+    Adult["Mark category=adult"]
+    Discard["Drop and count<br/>spam / too small"]
     DB[("SQLite")]
     Web["Next.js frontend"]
     Mod["LLM moderation<br/>OpenRouter free model"]
-    Blocked[("blocked table")]
+    Categories[("categories table")]
 
     Crawler <-->|UDP| DHT
     Crawler -->|new infohashes| Scraper
     Scraper -->|ranked by seeders| Fetcher
     Fetcher --> Filter
-    Filter -->|hit| Discard
-    Filter -->|pass| DB
+	Filter -->|adult| Adult
+	Adult --> DB
+	Filter -->|spam / too small| Discard
+	Filter -->|general| DB
     Web <-->|REST API| DB
     DB -->|hourly incremental review| Mod
-    Mod -->|adult/spam: delete| Blocked
-    Mod -->|title ad-trim: clean_name| DB
-    Blocked -.->|rejected on insert, no resurrection| DB
+	Mod -->|category + confidence + reason| Categories
+	Mod -->|title ad-trim: clean_name| DB
+	Categories -.->|safe / all / adult views| Web
 ```
 
 - `server/` — Go 后端：DHT 爬虫（anacrolix/dht/v2）、BEP-9 元数据获取（anacrolix/torrent）、过滤引擎（中英文成人词表 + 垃圾启发式）、SQLite 存储（modernc.org/sqlite，无 cgo）、REST API（标准库 net/http）
@@ -121,7 +124,7 @@ LLM 审核相关（见下文「LLM 二次审核」）：
 | `MODERATION_INTERVAL` | `1h` | 审核周期 |
 | `MODERATION_BATCH_SIZE` | `100` | 每次请求送审的标题数 |
 | `MODERATION_MAX_BATCHES` | `20` | 每轮最多几批（0 = 不限），用于封顶开销 |
-| `MODERATION_DRY_RUN` | `false` | 只打日志不删除 |
+| `MODERATION_DRY_RUN` | `false` | 只打日志，不写入分类或审核时间 |
 | `MODERATION_TRIM_TITLES` | `true` | 顺带清理标题里的广告文字 |
 
 ### 前端
@@ -136,8 +139,10 @@ npm run dev                  # 开发
 
 ## API
 
-- `GET /api/search?q=xx&page=1&page_size=20` — 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接
-- `GET /api/stats` — 收录数、成人/垃圾/体积过滤计数、LLM 审核统计、爬虫状态
+- `GET /api/search?q=xx&page=1&page_size=20` — 安全搜索（默认排除 adult/spam，q 为空返回最新收录）
+- `GET /api/search?q=xx&include_adult=true` — 搜索 general + adult，仍排除 spam
+- `GET /api/search?q=xx&category=adult` — 只搜索成人分类；也支持 `general` / `spam` / `all`
+- `GET /api/stats` — 收录数、分类数、垃圾/体积过滤计数、LLM 审核统计、爬虫状态
 - `GET /api/healthz` — 健康检查
 
 ## DoS 防护
@@ -184,31 +189,46 @@ API 搜索路径加入同一防护规则；仅监听回环地址时则不需要�
 
 ## 过滤策略
 
-### 第一道：入库前的静态过滤
+### 第一道：入库前的静态分类与过滤
 
-- **成人内容**：内置 230+ 中英文关键词（短词用词边界正则防误伤，如 Avatar/Avengers 不会被 "av" 误拦），对资源名和文件名匹配；JAV 番号等弱信号需叠加其他信号才判定
+- **成人内容**：内置 230+ 中英文关键词（短词用词边界正则防误伤，如 Avatar/Avengers 不会被 "av" 误拦），对资源名和文件名匹配；命中后以 `category='adult'` 入库，不再丢弃
 - **垃圾信息**：SEO 关键词堆叠、纯符号/超长名称、零大小或异常大小、超大文件数、随机字符串文件名占比等启发式规则
 - **体积下限**：总体积小于 `MIN_TORRENT_SIZE`（默认 100 MiB）的种子直接丢弃，滤掉假种、单图、纯链接/说明文件等垃圾
 
-命中任一即丢弃并计入统计（`adult_filtered` / `spam_filtered` / `size_filtered`）。规则见 `server/internal/filter/`。
+垃圾或体积下限命中仍会丢弃并计入 `spam_filtered` / `size_filtered`；成人命中计入 `adult_classified` 并保留。规则见 `server/internal/filter/`。
 
 ### 第二道：LLM 二次审核（每小时）
 
-静态词表只能拦住明写关键词的内容。后台每小时调用一次 OpenAI 兼容 API，对**尚未审核过**的库内记录做批量复审，判定为成人或垃圾的直接删除。
+静态词表只能识别明写关键词的内容。后台每小时调用一次 OpenAI 兼容 API，对**尚未审核过**的库内记录做批量复审。模型返回 `category`、`confidence` 和 `reason`，结果写入分类表，原始种子始终保留。
 
 - **增量**：每行有 `reviewed_at` 标记，只为没审过的行付费，不会每小时重扫全库
-- **不会复活**：删除的 infohash 写入 `blocked` 表，爬虫与增量同步都不会再把它加回来
-- **失败安全**：API 报错时该批不标记已审，下轮重试；模型返回无法解析、标签未知或漏项一律按 `ok` 处理，绝不因不确定而删除
+- **默认安全**：普通搜索排除 `adult` 和 `spam`；成人内容必须显式选择“全部”或“成人”视图
+- **可重新分类**：规则变化时重置 `reviewed_at` 即可重审，无需重新爬取已经收录的元数据
+- **失败安全**：API 报错时该批不标记已审，下轮重试；模型返回无法解析、标签未知或漏项一律按 `ok` 处理
 - **开销可控**：`MODERATION_MAX_BATCHES × MODERATION_BATCH_SIZE` 即每小时上限（默认 2000 条／小时）
 - **提示词**：明确要求「盗版本身不算垃圾」，否则模型会把整个库都判成垃圾；见 `server/internal/moderator/moderator.go` 的 `systemPromptFor`
 
-首次开启建议先跑一轮 dry-run 看日志，确认判定符合预期再放开删除：
+首次开启建议先跑一轮 dry-run 看日志，确认判定符合预期再写入分类：
 
 ```bash
 MODERATION_DRY_RUN=true go run ./cmd/server
 ```
 
-审核统计通过 `GET /api/stats` 的 `moderation` 字段暴露（`reviewed` / `adult_removed` / `spam_removed` / `errors` / `pending` / `blocked`）。
+审核统计通过 `GET /api/stats` 的 `moderation` 字段暴露（`reviewed` / `adult_classified` / `spam_classified` / `errors` / `pending` / `blocked`）。`blocked` 仅保留给版权等需要永久拒绝重新入库的场景。
+
+分类信息与主体记录分表，便于以后增加 anime、movie、music 等类型：
+
+```sql
+CREATE TABLE categories (
+    info_hash TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 1,
+    reason TEXT NOT NULL DEFAULT '',
+    reviewed_at INTEGER NOT NULL DEFAULT 0
+);
+```
+
+从旧版升级时，`blocked` 中历史 `adult` / `spam` 记录会一次性迁成分类占位并解除永久拒绝；由于旧版已经删除了主体元数据，只能等爬虫再次发现相同 infohash 后恢复，但恢复前后都不会泄漏到安全搜索。`copyright` 等永久移除原因不迁移。
 
 ### 顺带：标题去广告（`MODERATION_TRIM_TITLES`）
 

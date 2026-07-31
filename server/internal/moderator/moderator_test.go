@@ -57,8 +57,10 @@ func fakeAPI(t *testing.T, label func(title string) string, calls *int32) *httpt
 			t.Fatal(err)
 		}
 		type v struct {
-			I     int    `json:"i"`
-			Label string `json:"label"`
+			I          int     `json:"i"`
+			Category   string  `json:"category"`
+			Confidence float64 `json:"confidence"`
+			Reason     string  `json:"reason"`
 		}
 		var items []promptItem
 		if err := json.Unmarshal([]byte(req.Messages[1].Content), &items); err != nil {
@@ -66,7 +68,7 @@ func fakeAPI(t *testing.T, label func(title string) string, calls *int32) *httpt
 		}
 		var out []v
 		for _, it := range items {
-			out = append(out, v{I: it.I, Label: label(it.Title)})
+			out = append(out, v{I: it.I, Category: label(it.Title), Confidence: 0.9, Reason: "test reason"})
 		}
 		content, _ := json.Marshal(map[string]any{"verdicts": out})
 		json.NewEncoder(w).Encode(chatResponse{Choices: []struct {
@@ -93,7 +95,7 @@ func newMod(t *testing.T, st *store.Store, url string, tweak func(*Config)) *Mod
 	return m
 }
 
-func TestSweepRemovesAdultAndSpamKeepsOK(t *testing.T) {
+func TestSweepClassifiesAdultAndSpamKeepsAllRows(t *testing.T) {
 	st := newStore(t)
 	seed(t, st, "Big Buck Bunny 1080p", "Hot XXX Collection", "FREE CRACK DOWNLOAD click here", "Ubuntu 24.04 ISO")
 
@@ -111,7 +113,7 @@ func TestSweepRemovesAdultAndSpamKeepsOK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Reviewed != 4 || s.Adult != 1 || s.Spam != 1 || s.Deleted != 2 {
+	if s.Reviewed != 4 || s.Adult != 1 || s.Spam != 1 || s.Classified != 4 {
 		t.Fatalf("summary = %+v", s)
 	}
 
@@ -120,12 +122,21 @@ func TestSweepRemovesAdultAndSpamKeepsOK(t *testing.T) {
 		t.Fatal(err)
 	}
 	if total != 2 {
-		t.Fatalf("remaining = %d, want 2", total)
+		t.Fatalf("safe results = %d, want 2", total)
 	}
 	for _, it := range items {
 		if strings.Contains(it.Name, "XXX") || strings.Contains(it.Name, "CRACK") {
 			t.Fatalf("flagged torrent survived: %q", it.Name)
 		}
+	}
+	if _, total, err := st.Search(t.Context(), "", 1, 10, store.SearchFilter{Category: store.CategoryAdult}); err != nil || total != 1 {
+		t.Fatalf("adult results = %d, err=%v; want 1", total, err)
+	}
+	if _, total, err := st.Search(t.Context(), "", 1, 10, store.SearchFilter{Category: store.CategorySpam}); err != nil || total != 1 {
+		t.Fatalf("spam results = %d, err=%v; want 1", total, err)
+	}
+	if total, _ := st.Count(t.Context()); total != 4 {
+		t.Fatalf("stored rows = %d, want 4", total)
 	}
 }
 
@@ -151,7 +162,7 @@ func TestReviewedRowsAreNotReclassified(t *testing.T) {
 	}
 }
 
-func TestBlockedTorrentIsNotReAdded(t *testing.T) {
+func TestClassifiedTorrentIsRetainedAcrossRediscovery(t *testing.T) {
 	st := newStore(t)
 	seed(t, st, "Hot XXX Collection")
 	srv := fakeAPI(t, func(string) string { return "adult" }, nil)
@@ -166,10 +177,13 @@ func TestBlockedTorrentIsNotReAdded(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 0 {
-		t.Fatalf("blocked infohash was re-added (total=%d)", total)
+		t.Fatalf("adult torrent leaked into safe results (total=%d)", total)
 	}
-	if n, _ := st.BlockedCount(t.Context()); n != 1 {
-		t.Fatalf("blocked count = %d, want 1", n)
+	if _, total, _ := st.Search(t.Context(), "", 1, 10, store.SearchFilter{Category: store.CategoryAdult}); total != 1 {
+		t.Fatalf("adult results = %d, want 1", total)
+	}
+	if n, _ := st.BlockedCount(t.Context()); n != 0 {
+		t.Fatalf("blocked count = %d, want 0", n)
 	}
 }
 
@@ -183,11 +197,14 @@ func TestDryRunDeletesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Adult != 1 || s.Deleted != 0 {
-		t.Fatalf("summary = %+v, want Adult=1 Deleted=0", s)
+	if s.Adult != 1 || s.Classified != 0 {
+		t.Fatalf("summary = %+v, want Adult=1 Classified=0", s)
 	}
 	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 1 {
 		t.Fatalf("dry run deleted rows (total=%d)", total)
+	}
+	if n, _ := st.PendingReviewCount(t.Context()); n != 1 {
+		t.Fatalf("dry run marked row reviewed (pending=%d)", n)
 	}
 }
 
@@ -254,8 +271,8 @@ func TestUnknownAndMissingLabelsDefaultToOK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Deleted != 0 {
-		t.Fatalf("deleted %d rows on malformed verdicts, want 0", s.Deleted)
+	if s.Classified != 3 {
+		t.Fatalf("classified %d rows, want 3", s.Classified)
 	}
 	if _, total, _ := st.Search(t.Context(), "", 1, 10); total != 3 {
 		t.Fatalf("total = %d, want 3", total)

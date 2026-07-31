@@ -1,5 +1,6 @@
-// Package filter implements adult/spam content filtering for indexed
-// torrents. A torrent is dropped when either Adult or Spam is true.
+// Package filter detects adult, spam and undersized torrent metadata. Adult
+// signals are persisted as classifications; spam and undersized records are
+// dropped by the ingestion pipeline.
 package filter
 
 import (
@@ -23,8 +24,8 @@ type Result struct {
 	Reasons  []string `json:"reasons,omitempty"`
 }
 
-// Rejected reports whether any signal fired, i.e. the torrent must not be
-// indexed.
+// Rejected reports whether any signal fired. It is retained for corpus
+// evaluation; ingestion handles Adult as a classification rather than a drop.
 func (r Result) Rejected() bool { return r.Adult || r.Spam || r.TooSmall }
 
 // MinTotalSize is the smallest torrent worth indexing. Anything below it is
@@ -110,8 +111,8 @@ func isShortASCII(s string) bool {
 	return true
 }
 
-// Check inspects a torrent's name, file list and total size and returns
-// whether it should be dropped as adult or spam content.
+// Check inspects a torrent's name, file list and total size and returns all
+// detected signals.
 func Check(name string, files []File, totalSize int64) Result {
 	var r Result
 	add := func(format string, args ...interface{}) {

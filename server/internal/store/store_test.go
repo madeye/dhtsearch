@@ -328,3 +328,117 @@ func TestSetCleanNamesEmptyMapIsNoOp(t *testing.T) {
 		t.Fatalf("SetCleanNames(nil) = %d, %v; want 0, nil", n, err)
 	}
 }
+
+func TestAdultCategoryIsStoredAndFiltered(t *testing.T) {
+	s := openTest(t)
+	if err := s.Upsert(Torrent{
+		InfoHash: "adult", Name: "classified title", Category: CategoryAdult,
+		CategoryConfidence: 1, CategoryReason: "static keyword", TotalSize: 1 << 30, CreatedAt: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upsert(Torrent{InfoHash: "safe", Name: "safe title", TotalSize: 1 << 30, CreatedAt: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, total, err := s.Search(t.Context(), "", 1, 10)
+	if err != nil || total != 1 || items[0].InfoHash != "safe" {
+		t.Fatalf("safe search: items=%v total=%d err=%v", items, total, err)
+	}
+	items, total, err = s.Search(t.Context(), "classified", 1, 10, SearchFilter{IncludeAdult: true})
+	if err != nil || total != 1 || items[0].Category != CategoryAdult {
+		t.Fatalf("include adult: items=%v total=%d err=%v", items, total, err)
+	}
+	items, err = s.Latest(t.Context(), 1, 10, SearchFilter{Category: CategoryAdult})
+	if err != nil || len(items) != 1 || items[0].InfoHash != "adult" {
+		t.Fatalf("adult only: items=%v err=%v", items, err)
+	}
+	if count, err := s.CountSearchable(t.Context(), SearchFilter{IncludeAdult: true}); err != nil || count != 2 {
+		t.Fatalf("all searchable count=%d err=%v", count, err)
+	}
+
+	var confidence float64
+	var reason string
+	if err := s.db.QueryRow(`SELECT confidence, reason FROM categories WHERE info_hash='adult'`).Scan(&confidence, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if confidence != 1 || reason != "static keyword" {
+		t.Fatalf("classification metadata = %v, %q", confidence, reason)
+	}
+}
+
+func TestClassifyUpdatesCategoryWithoutDeleting(t *testing.T) {
+	s := openTest(t)
+	if err := s.Upsert(Torrent{InfoHash: "aa", Name: "review me", TotalSize: 1 << 30, CreatedAt: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Classify([]Classification{{
+		InfoHash: "aa", Category: CategoryAdult, Confidence: 0.91, Reason: "model reason",
+	}}, 500); err != nil {
+		t.Fatal(err)
+	}
+	if count, _ := s.Count(t.Context()); count != 1 {
+		t.Fatalf("stored count=%d, want 1", count)
+	}
+	if pending, _ := s.PendingReviewCount(t.Context()); pending != 0 {
+		t.Fatalf("pending=%d, want 0", pending)
+	}
+	var confidence float64
+	var reason string
+	if err := s.db.QueryRow(`SELECT confidence, reason FROM categories WHERE info_hash='aa'`).Scan(&confidence, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if confidence != 0.91 || reason != "model reason" {
+		t.Fatalf("classification metadata=%v, %q", confidence, reason)
+	}
+	items, total, err := s.Search(t.Context(), "review", 1, 10, SearchFilter{Category: CategoryAdult})
+	if err != nil || total != 1 || items[0].InfoHash != "aa" {
+		t.Fatalf("classified search: items=%v total=%d err=%v", items, total, err)
+	}
+}
+
+func TestOpenMigratesLegacyAdultAndSpamBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-blocks.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM stats WHERE key='legacy_block_categories_v1';
+		INSERT INTO blocked VALUES ('adult-old', 'adult', 'old adult title', 100);
+		INSERT INTO blocked VALUES ('spam-old', 'spam', 'old spam title', 101);
+		INSERT INTO blocked VALUES ('copyright-old', 'copyright', 'removed work', 102);`); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if blocked, err := s.BlockedCount(t.Context()); err != nil || blocked != 1 {
+		t.Fatalf("permanent blocked=%d err=%v, want 1", blocked, err)
+	}
+	for _, torrent := range []Torrent{
+		{InfoHash: "adult-old", Name: "restored adult", TotalSize: 1, CreatedAt: 200},
+		{InfoHash: "spam-old", Name: "restored spam", TotalSize: 1, CreatedAt: 201},
+		{InfoHash: "copyright-old", Name: "must stay blocked", TotalSize: 1, CreatedAt: 202},
+	} {
+		if err := s.Upsert(torrent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count, _ := s.Count(t.Context()); count != 2 {
+		t.Fatalf("restored count=%d, want 2", count)
+	}
+	if _, total, _ := s.Search(t.Context(), "", 1, 10); total != 0 {
+		t.Fatalf("legacy classifications leaked into safe results: %d", total)
+	}
+	if _, total, _ := s.Search(t.Context(), "", 1, 10, SearchFilter{Category: CategoryAdult}); total != 1 {
+		t.Fatalf("adult category total=%d, want 1", total)
+	}
+	if _, total, _ := s.Search(t.Context(), "", 1, 10, SearchFilter{Category: CategorySpam}); total != 1 {
+		t.Fatalf("spam category total=%d, want 1", total)
+	}
+}

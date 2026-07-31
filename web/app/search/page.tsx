@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { fetchSearch, type SearchResponse } from "@/lib/api";
+import { fetchSearch, type ContentFilter, type SearchResponse } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import ResultList from "@/components/ResultList";
 import Pagination from "@/components/Pagination";
 
 interface PageProps {
-  searchParams: Promise<{ q?: string; page?: string }>;
+  searchParams: Promise<{ q?: string; page?: string; include_adult?: string; category?: string }>;
 }
 
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
@@ -26,11 +26,17 @@ export default async function SearchPage({ searchParams }: PageProps) {
   const q = (params.q ?? "").trim();
   const page = Math.max(1, parseInt(params.page ?? "1", 10) || 1);
   const pageSize = 20;
+  const contentFilter: ContentFilter =
+    params.category === "adult"
+      ? "adult"
+      : params.include_adult === "true"
+        ? "all"
+        : "safe";
 
   let data: SearchResponse | null = null;
   let error: string | null = null;
   try {
-    data = await fetchSearch(q, page, pageSize);
+    data = await fetchSearch(q, page, pageSize, contentFilter);
   } catch (e) {
     error = e instanceof Error ? e.message : "unknown error";
   }
@@ -46,16 +52,26 @@ export default async function SearchPage({ searchParams }: PageProps) {
           DHT<span className="text-emerald-500">Search</span>
         </Link>
         <div className="flex-1">
-          <SearchBox initialQuery={q} />
+          <SearchBox initialQuery={q} contentFilter={contentFilter} />
         </div>
       </header>
 
-      <div className="mt-4 rounded-md border border-emerald-900/50 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-300/80">
-        🛡️ 本站结果已自动过滤成人内容与垃圾信息，请放心使用。
+      <ContentFilterTabs q={q} selected={contentFilter} />
+
+      <div className={`mt-3 rounded-md border px-3 py-2 text-xs ${
+        contentFilter === "safe"
+          ? "border-emerald-900/50 bg-emerald-950/30 text-emerald-300/80"
+          : "border-amber-900/50 bg-amber-950/30 text-amber-200/80"
+      }`}>
+        {contentFilter === "safe"
+          ? "🛡️ 安全模式已隐藏成人内容与垃圾信息。"
+          : contentFilter === "adult"
+            ? "🔞 当前仅显示标记为成人内容的结果。"
+            : "🔞 当前结果包含成人内容；垃圾信息仍然隐藏。"}
       </div>
 
       {error ? (
-        <BackendError q={q} detail={error} />
+        <BackendError q={q} contentFilter={contentFilter} detail={error} />
       ) : data && data.results && data.results.length > 0 ? (
         <>
           <p className="mt-4 text-sm text-zinc-400">
@@ -69,7 +85,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
             )}
           </p>
           <ResultList results={data.results} />
-          <Pagination q={q} page={data.page ?? page} total={data.total ?? 0} pageSize={data.page_size ?? pageSize} />
+          <Pagination q={q} page={data.page ?? page} total={data.total ?? 0} pageSize={data.page_size ?? pageSize} contentFilter={contentFilter} />
         </>
       ) : (
         <div className="mt-16 text-center">
@@ -89,7 +105,49 @@ export default async function SearchPage({ searchParams }: PageProps) {
   );
 }
 
-function BackendError({ q, detail }: { q: string; detail: string }) {
+function ContentFilterTabs({ q, selected }: { q: string; selected: ContentFilter }) {
+  const filters: Array<{ value: ContentFilter; label: string }> = [
+    { value: "safe", label: "安全" },
+    { value: "all", label: "全部" },
+    { value: "adult", label: "成人" },
+  ];
+  const hrefFor = (value: ContentFilter) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (value === "all") params.set("include_adult", "true");
+    if (value === "adult") params.set("category", "adult");
+    const suffix = params.toString();
+    return suffix ? `/search?${suffix}` : "/search";
+  };
+
+  return (
+    <nav aria-label="内容筛选" className="mt-4 flex gap-1 rounded-lg bg-zinc-900 p-1">
+      {filters.map((filter) => {
+        const href = hrefFor(filter.value);
+        return (
+		  <a
+			key={filter.value}
+			href={href}
+            className={`flex-1 rounded-md px-3 py-1.5 text-center text-sm transition-colors ${
+              selected === filter.value
+                ? "bg-zinc-700 text-zinc-100"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {filter.label}
+		  </a>
+        );
+      })}
+    </nav>
+  );
+}
+
+function BackendError({ q, contentFilter, detail }: { q: string; contentFilter: ContentFilter; detail: string }) {
+  const retryParams = new URLSearchParams();
+  if (q) retryParams.set("q", q);
+  if (contentFilter === "all") retryParams.set("include_adult", "true");
+  if (contentFilter === "adult") retryParams.set("category", "adult");
+  const retryQuery = retryParams.toString();
   return (
     <div className="mt-16 text-center">
       <p className="text-lg text-zinc-300">无法连接到搜索服务</p>
@@ -100,7 +158,7 @@ function BackendError({ q, detail }: { q: string; detail: string }) {
       </p>
       <p className="mt-1 font-mono text-xs text-zinc-600">{detail}</p>
       <Link
-        href={q ? `/search?q=${encodeURIComponent(q)}` : "/search"}
+        href={retryQuery ? `/search?${retryQuery}` : "/search"}
         className="mt-6 inline-block rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:border-emerald-600 hover:text-emerald-400"
       >
         重试
