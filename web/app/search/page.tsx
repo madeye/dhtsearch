@@ -5,6 +5,7 @@ import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import ResultList from "@/components/ResultList";
 import Pagination from "@/components/Pagination";
+import DigitalOceanBadge from "@/components/DigitalOceanBadge";
 
 interface PageProps {
   searchParams: Promise<{ q?: string; page?: string }>;
@@ -48,6 +49,7 @@ export default async function SearchPage({ searchParams }: PageProps) {
         <div className="flex-1">
           <SearchBox initialQuery={q} />
         </div>
+        <DigitalOceanBadge className="hidden shrink-0 sm:inline-block" />
       </header>
 
       <div className="mt-4 rounded-md border border-emerald-900/50 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-300/80">
