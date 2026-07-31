@@ -1,6 +1,7 @@
 import { fetchStats } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
+import DigitalOceanBadge from "@/components/DigitalOceanBadge";
 
 export default async function Home() {
   const stats = await fetchStats();
@@ -40,6 +41,9 @@ export default async function Home() {
         ) : (
           <p>索引统计暂时不可用（后端未连接）</p>
         )}
+        <div className="mt-6 flex justify-center">
+          <DigitalOceanBadge />
+        </div>
       </footer>
     </main>
   );
