@@ -1,10 +1,30 @@
-import { fetchStats } from "@/lib/api";
+import Link from "next/link";
+import { fetchStats, fetchTrending } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import SearchBox from "@/components/SearchBox";
 import DigitalOceanBadge from "@/components/DigitalOceanBadge";
 
+function TrendingRow({ label, titles }: { label: string; titles: string[] }) {
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+      <span className="text-xs text-zinc-500">{label}</span>
+      {titles.map((title) => (
+        <Link
+          key={title}
+          href={`/search?q=${encodeURIComponent(title)}`}
+          className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1 text-xs text-zinc-300 transition-colors hover:border-emerald-700 hover:text-emerald-400"
+        >
+          {title}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
 export default async function Home() {
-  const stats = await fetchStats();
+  const [stats, trending] = await Promise.all([fetchStats(), fetchTrending()]);
+  const movies = trending?.movies ?? [];
+  const tv = trending?.tv ?? [];
 
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-4 py-16">
@@ -26,6 +46,16 @@ export default async function Home() {
         <p className="mt-4 text-center text-xs text-zinc-500">
           直接输入关键词搜索，留空则浏览最新收录的资源
         </p>
+
+        {(movies.length > 0 || tv.length > 0) && (
+          <div className="mt-8">
+            {movies.length > 0 && <TrendingRow label="热门电影" titles={movies} />}
+            {tv.length > 0 && <TrendingRow label="热门剧集" titles={tv} />}
+            <p className="mt-2 text-center text-[10px] text-zinc-600">
+              热门影视数据来自豆瓣
+            </p>
+          </div>
+        )}
       </div>
 
       <footer className="mt-16 text-center text-xs text-zinc-500">

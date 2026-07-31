@@ -82,6 +82,28 @@ export async function fetchSearch(
   return (await res.json()) as SearchResponse;
 }
 
+export interface TrendingResponse {
+  movies?: string[];
+  tv?: string[];
+  updated_at?: number;
+}
+
+export async function fetchTrending(): Promise<TrendingResponse | null> {
+  try {
+    // The backend refreshes hourly; revalidate keeps the homepage from
+    // hitting the API per request. No per-client IP headers here — they
+    // would fragment this shared cache into one entry per visitor.
+    const res = await fetch(`${API_BASE}/api/trending`, {
+      next: { revalidate: 300 },
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as TrendingResponse;
+  } catch {
+    // Trending is decorative — degrade to no section.
+    return null;
+  }
+}
+
 export async function fetchStats(): Promise<StatsResponse | null> {
   try {
     const res = await fetch(`${API_BASE}/api/stats`, {
