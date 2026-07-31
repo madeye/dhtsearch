@@ -238,6 +238,46 @@ UPDATE torrents SET reviewed_at = 0;
 
 ## 部署
 
+### Docker
+
+仓库根目录自带单镜像 `Dockerfile`：同一个容器里跑 Go API（`:8080`）和
+Next standalone 前端（`:3000`），默认把前端指向容器内的后端
+`http://127.0.0.1:8080`。镜像内不携带任何密钥；运行时通过环境变量或
+`--env-file` 注入即可。
+
+构建：
+
+```bash
+docker build -t dhtsearch .
+```
+
+运行：
+
+```bash
+docker run --rm \
+  -p 3000:3000 \
+  -p 8080:8080 \
+  -p 6881:6881/udp \
+  -v dhtsearch-data:/data \
+  --env-file .env \
+  dhtsearch
+```
+
+- 前端入口：`http://localhost:3000`
+- API：`http://localhost:8080`
+- 健康检查：同时探测 `/` 和 `/api/healthz`
+- 数据库默认写到 `/data/dhtsearch.db`
+- 容器内默认 `DHT_PORT=6881`；要接收入站 DHT 流量时记得映射 UDP 端口
+
+如果前端不和后端同容器，需在**构建时**改掉前端 API 地址（这是 Next.js
+公开环境变量，编译进产物而不是运行时热读）：
+
+```bash
+docker build \
+  --build-arg NEXT_PUBLIC_API_BASE=https://api.example.com \
+  -t dhtsearch-web-external-api .
+```
+
 `deploy.sh` 一键构建并部署到远程服务器（不包含任何主机/域名/凭证，全部走环境变量）：
 
 ```bash
