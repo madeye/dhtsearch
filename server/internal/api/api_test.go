@@ -5,7 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/store"
@@ -102,6 +105,49 @@ func TestSearchClampsDeepPagination(t *testing.T) {
 	m := getJSON(t, base+"/api/search?q=&page=99999999&page_size=100")
 	if got, want := m["page"].(float64), float64(maxOffset/100+1); got != want {
 		t.Fatalf("page = %v, want clamped to %v", got, want)
+	}
+}
+
+func TestKeywordSearchCacheSingleFlights(t *testing.T) {
+	s := &Server{
+		opts:        Options{SearchCacheTTL: time.Minute},
+		searchCache: make(map[searchCacheKey]*searchCacheEntry),
+	}
+	key := searchCacheKey{query: "popular", page: 1, pageSize: 20}
+	var loads atomic.Int32
+	release := make(chan struct{})
+	load := func() ([]store.Torrent, int, error) {
+		loads.Add(1)
+		<-release
+		return []store.Torrent{{InfoHash: "aa"}}, 1, nil
+	}
+
+	const callers = 12
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			items, total, err := s.cachedSearch(t.Context(), key, load)
+			if err != nil || total != 1 || len(items) != 1 {
+				t.Errorf("cachedSearch = %v, %d, %v", items, total, err)
+			}
+		}()
+	}
+	for loads.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("loads = %d, want 1", got)
+	}
+
+	if _, _, err := s.cachedSearch(t.Context(), key, load); err != nil {
+		t.Fatal(err)
+	}
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("cached reload count = %d, want 1", got)
 	}
 }
 

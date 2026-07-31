@@ -142,14 +142,33 @@ npm run dev                  # 开发
 
 ## DoS 防护
 
-搜索是无鉴权接口，而每次关键词查询都是两遍全表扫描（SQLite 单连接），所以 API 层内置了四道闸门，全部可用环境变量调整（见上表）：
+搜索是无鉴权接口。关键词查询使用 SQLite FTS5 倒排索引，但计数、深分页和不足三个字符的短词仍可能较贵，因此 API 层内置了四道闸门，全部可用环境变量调整（见上表）：
 
 - **每 IP 限流**：令牌桶（默认持续 3 req/s、突发 30），超出返回 429 + `Retry-After`。真实客户端 IP 只信任来自回环/内网地址（反向代理或同机 Next SSR 进程）的 `X-Forwarded-For`，公网直连时伪造头无效；IPv6 按 /64 计桶，防止单机用整段地址刷新桶。`/api/healthz` 不限流，监控和部署健康检查不会被洪水挤掉。
 - **搜索准入**：并发搜索上限（默认 16），等不到槽位（1 秒）直接 503 甩负载——SQLite 只有一个连接，排队再深也只是白占内存。
-- **单查询预算**：每次搜索默认 10s 超时，客户端断开即取消，慢查询不会继续占着数据库；关键词最多取前 8 个（每个关键词都让每行多算两次 LIKE），翻页深度上限 10000 行（`OFFSET` 越深扫描越贵），查询串按 UTF-8 边界截断到 200 字节。
+- **单查询预算**：每次搜索默认 10s 超时，客户端断开即取消，慢查询不会继续占着数据库；关键词最多取前 8 个，翻页深度上限 10000 行（`OFFSET` 越深扫描越贵），查询串按 UTF-8 边界截断到 200 字节。
 - **HTTP 层**：Read/Write/Idle 超时加 16 KB 请求头上限，挡 slowloris 和超大头攻击。
 
-另外 `/api/stats` 和首页总数走 10 秒 TTL 的单飞缓存（并发未命中只有一个请求去查库），聚合扫描每周期最多一次；`created_at` 索引让空查询（首页默认请求）从全表排序变成走索引取前 20 行。
+另外 `/api/stats`、首页总数和关键词结果页都走 10 秒 TTL 的单飞缓存（同一个热词并发未命中只有一个请求去查库）；关键词缓存最多保留 256 页，避免无界占用内存。`created_at` 索引让空查询（首页默认请求）从全表排序变成走索引取前 20 行。
+
+### SQLite 索引
+
+启动时会自动创建 `created_at` 普通索引和 FTS5 trigram 全文索引，并为已有数据做一次回填：
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_torrents_created
+    ON torrents(created_at DESC);
+
+CREATE VIRTUAL TABLE torrents_fts USING fts5(
+    name,
+    clean_name,
+    content='torrents',
+    content_rowid='rowid',
+    tokenize='trigram case_sensitive 0'
+);
+```
+
+插入、删除以及 `clean_name` 更新由数据库触发器同步到倒排索引。三字及以上的关键词使用 `MATCH`，按 FTS5 相关度、再按收录时间排序；一到两个字符没有 trigram，保留 `LIKE` 兼容路径。长短词混合时，短词只扫描已经被 FTS 缩小的候选集。
 
 前端 SSR 请求会把入站的 `X-Forwarded-For` / `X-Real-IP` 透传给后端，限流按真实访客计——注意反向代理需设置这两个头（nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`）。
 

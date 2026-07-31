@@ -32,6 +32,8 @@ const (
 	defaultMaxInflight   = 16
 	defaultSearchTimeout = 10 * time.Second
 	defaultStatsTTL      = 10 * time.Second
+	defaultSearchTTL     = 10 * time.Second
+	maxSearchCacheItems  = 256
 )
 
 // Options tunes the API's DoS defenses. Zero values pick safe defaults,
@@ -50,6 +52,9 @@ type Options struct {
 	// StatsTTL is how long stats and total-count responses are served from
 	// cache. Stats hit four aggregate queries; caching makes them O(1).
 	StatsTTL time.Duration
+	// SearchCacheTTL caches successful keyword result pages. Repeated hot
+	// queries are single-flighted so only one request reaches SQLite.
+	SearchCacheTTL time.Duration
 	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
 	ScraperStatus func() ScraperStatus
 }
@@ -100,6 +105,22 @@ type Server struct {
 	countMu   sync.Mutex
 	countVal  int
 	countAt   time.Time
+
+	searchMu    sync.Mutex
+	searchCache map[searchCacheKey]*searchCacheEntry
+}
+
+type searchCacheKey struct {
+	query          string
+	page, pageSize int
+}
+
+type searchCacheEntry struct {
+	items []store.Torrent
+	total int
+	at    time.Time
+	ready chan struct{}
+	err   error
 }
 
 // New builds the HTTP handler. crawlerStatus may be nil.
@@ -116,12 +137,16 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	if opts.StatsTTL <= 0 {
 		opts.StatsTTL = defaultStatsTTL
 	}
+	if opts.SearchCacheTTL <= 0 {
+		opts.SearchCacheTTL = defaultSearchTTL
+	}
 	s := &Server{
-		st:        st,
-		crawler:   crawlerStatus,
-		logger:    logger,
-		opts:      opts,
-		searchSem: make(chan struct{}, opts.MaxInflight),
+		st:          st,
+		crawler:     crawlerStatus,
+		logger:      logger,
+		opts:        opts,
+		searchSem:   make(chan struct{}, opts.MaxInflight),
+		searchCache: make(map[searchCacheKey]*searchCacheEntry),
 	}
 	if opts.RateRPS > 0 {
 		burst := opts.RateBurst
@@ -218,7 +243,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			total, err = s.cachedCount(ctx)
 		}
 	} else {
-		items, total, err = s.st.Search(ctx, q, page, pageSize)
+		key := searchCacheKey{
+			query:    strings.Join(strings.Fields(q), " "),
+			page:     page,
+			pageSize: pageSize,
+		}
+		items, total, err = s.cachedSearch(ctx, key, func() ([]store.Torrent, int, error) {
+			return s.st.Search(ctx, q, page, pageSize)
+		})
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -248,6 +280,61 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"page_size": pageSize,
 		"results":   results,
 	})
+}
+
+// cachedSearch returns a successful keyword page from a bounded TTL cache.
+// An entry with a non-nil ready channel is being loaded; concurrent callers
+// wait for that exact load instead of queuing duplicate SQLite scans.
+func (s *Server) cachedSearch(
+	ctx context.Context,
+	key searchCacheKey,
+	load func() ([]store.Torrent, int, error),
+) ([]store.Torrent, int, error) {
+	s.searchMu.Lock()
+	if entry := s.searchCache[key]; entry != nil {
+		if entry.ready != nil {
+			ready := entry.ready
+			s.searchMu.Unlock()
+			select {
+			case <-ready:
+				return entry.items, entry.total, entry.err
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			}
+		}
+		if time.Since(entry.at) < s.opts.SearchCacheTTL {
+			items, total := entry.items, entry.total
+			s.searchMu.Unlock()
+			return items, total, nil
+		}
+		delete(s.searchCache, key)
+	}
+	if len(s.searchCache) >= maxSearchCacheItems {
+		var oldestKey searchCacheKey
+		var oldest time.Time
+		for candidate, entry := range s.searchCache {
+			if entry.ready == nil && (oldest.IsZero() || entry.at.Before(oldest)) {
+				oldestKey, oldest = candidate, entry.at
+			}
+		}
+		if !oldest.IsZero() {
+			delete(s.searchCache, oldestKey)
+		}
+	}
+	entry := &searchCacheEntry{ready: make(chan struct{})}
+	s.searchCache[key] = entry
+	s.searchMu.Unlock()
+
+	entry.items, entry.total, entry.err = load()
+	s.searchMu.Lock()
+	entry.at = time.Now()
+	if entry.err != nil {
+		delete(s.searchCache, key)
+	}
+	close(entry.ready)
+	entry.ready = nil
+	s.searchMu.Unlock()
+	return entry.items, entry.total, entry.err
 }
 
 // cachedCount returns the total torrent count, at most StatsTTL stale.

@@ -321,6 +321,57 @@ func TestSetCleanNamesReplacesDisplayNameOnly(t *testing.T) {
 	}
 }
 
+func TestFTS5BackfillAndTriggerSync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fts.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE torrents (
+		info_hash TEXT PRIMARY KEY, name TEXT NOT NULL, total_size INTEGER NOT NULL,
+		file_count INTEGER NOT NULL, files BLOB NOT NULL, created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NOT NULL DEFAULT 0, clean_name TEXT NOT NULL DEFAULT ''
+	);
+	CREATE TABLE stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+	CREATE TABLE blocked (
+		info_hash TEXT PRIMARY KEY, reason TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL
+	);
+	INSERT INTO torrents VALUES ('old', '前缀电影资源后缀', 1, 0, '[]', 100, 0, '');`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	items, total, err := s.Search(t.Context(), "电影资", 1, 10)
+	if err != nil || total != 1 || items[0].InfoHash != "old" {
+		t.Fatalf("backfilled substring search: items=%v total=%d err=%v", items, total, err)
+	}
+	if err := s.Upsert(Torrent{InfoHash: "new", Name: "ordinary title", TotalSize: 2, CreatedAt: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, err = s.Search(t.Context(), "ordinary", 1, 10); err != nil || total != 1 {
+		t.Fatalf("insert trigger search: total=%d err=%v", total, err)
+	}
+	if _, err := s.SetCleanNames(map[string]string{"new": "目标标题资源"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, err = s.Search(t.Context(), "目标标", 1, 10); err != nil || total != 1 {
+		t.Fatalf("update trigger search: total=%d err=%v", total, err)
+	}
+	if _, err := s.Block([]string{"new"}, []string{"ordinary title"}, "spam", 300); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, err = s.Search(t.Context(), "目标标", 1, 10); err != nil || total != 0 {
+		t.Fatalf("delete trigger search: total=%d err=%v", total, err)
+	}
+}
+
 func TestSetCleanNamesEmptyMapIsNoOp(t *testing.T) {
 	s := openTest(t)
 	n, err := s.SetCleanNames(nil)

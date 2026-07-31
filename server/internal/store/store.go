@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
@@ -120,7 +121,57 @@ CREATE TABLE IF NOT EXISTS blocked (
 		db.Close()
 		return nil, fmt.Errorf("create created_at index: %w", err)
 	}
+	if err := ensureFTS5(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize full-text index: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// ensureFTS5 creates an external-content trigram index over both title forms.
+// Trigrams preserve the substring behavior users had with LIKE while letting
+// SQLite use an inverted index for terms of three or more Unicode codepoints.
+// The migration marker makes the one-time rebuild restart-safe: a crash before
+// the marker merely repeats an idempotent rebuild on the next Open.
+func ensureFTS5(db *sql.DB) error {
+	const schema = `
+CREATE VIRTUAL TABLE IF NOT EXISTS torrents_fts USING fts5(
+	name,
+	clean_name,
+	content='torrents',
+	content_rowid='rowid',
+	tokenize='trigram case_sensitive 0'
+);
+CREATE TRIGGER IF NOT EXISTS torrents_fts_ai AFTER INSERT ON torrents BEGIN
+	INSERT INTO torrents_fts(rowid, name, clean_name)
+	VALUES (new.rowid, new.name, new.clean_name);
+END;
+CREATE TRIGGER IF NOT EXISTS torrents_fts_ad AFTER DELETE ON torrents BEGIN
+	INSERT INTO torrents_fts(torrents_fts, rowid, name, clean_name)
+	VALUES ('delete', old.rowid, old.name, old.clean_name);
+END;
+CREATE TRIGGER IF NOT EXISTS torrents_fts_au AFTER UPDATE OF name, clean_name ON torrents BEGIN
+	INSERT INTO torrents_fts(torrents_fts, rowid, name, clean_name)
+	VALUES ('delete', old.rowid, old.name, old.clean_name);
+	INSERT INTO torrents_fts(rowid, name, clean_name)
+	VALUES (new.rowid, new.name, new.clean_name);
+END;`
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+
+	var migrated int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM stats WHERE key = 'fts5_trigram_v1'`).Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated != 0 {
+		return nil
+	}
+	if _, err := db.Exec(`INSERT INTO torrents_fts(torrents_fts) VALUES ('rebuild')`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`INSERT OR IGNORE INTO stats(key, value) VALUES ('fts5_trigram_v1', 1)`)
+	return err
 }
 
 // Shared zstd coders. EncodeAll/DecodeAll on a nil-stream coder are safe for
@@ -266,34 +317,60 @@ const selectCols = `SELECT info_hash, IIF(clean_name <> '', clean_name, name),
 	total_size, file_count, files, created_at FROM torrents`
 
 // Search finds torrents whose name contains every space-separated keyword
-// of query (AND semantics), newest first. An empty query returns the latest
-// additions. page is 1-based; pageSize must be > 0. ctx bounds the queries:
-// keyword matching is a full-table scan, so callers must be able to cut it
-// off when the client hangs up or a deadline passes.
+// of query (AND semantics), ranked by relevance and then recency. Terms of
+// three or more codepoints use the FTS5 trigram index. Short terms retain the
+// old LIKE behavior; when mixed with longer terms they only scan the rows
+// already narrowed by FTS. An empty query returns the latest additions.
 func (s *Store) Search(ctx context.Context, query string, page, pageSize int) (items []Torrent, total int, err error) {
 	if page < 1 {
 		page = 1
 	}
-	where, args := "", []interface{}{}
 	keywords := strings.Fields(query)
 	if len(keywords) > maxKeywords {
 		keywords = keywords[:maxKeywords]
 	}
-	if len(keywords) > 0 {
-		var conds []string
-		for _, kw := range keywords {
-			// Match either title: the raw one so trimming can never hide a
-			// result, and the cleaned one so a phrase that only reads
-			// contiguously once the ad text is gone still matches.
-			conds = append(conds, "(name LIKE ? ESCAPE '\\' OR clean_name LIKE ? ESCAPE '\\')")
-			args = append(args, "%"+escapeLike(kw)+"%", "%"+escapeLike(kw)+"%")
+	if len(keywords) == 0 {
+		if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents`).Scan(&total); err != nil {
+			return nil, 0, err
 		}
-		where = " WHERE " + strings.Join(conds, " AND ")
+		rows, qerr := s.db.QueryContext(ctx,
+			selectCols+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, pageSize, (page-1)*pageSize)
+		if qerr != nil {
+			return nil, 0, qerr
+		}
+		items, err = scanTorrents(rows)
+		return items, total, err
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM torrents`+where, args...).Scan(&total); err != nil {
+
+	var ftsTerms, shortTerms []string
+	for _, kw := range keywords {
+		if utf8.RuneCountInString(kw) >= 3 {
+			ftsTerms = append(ftsTerms, `"`+strings.ReplaceAll(kw, `"`, `""`)+`"`)
+		} else {
+			shortTerms = append(shortTerms, kw)
+		}
+	}
+
+	from := ` FROM torrents t`
+	var conds []string
+	args := make([]interface{}, 0, 1+len(shortTerms)*2)
+	order := ` ORDER BY t.created_at DESC`
+	if len(ftsTerms) > 0 {
+		from = ` FROM torrents_fts JOIN torrents t ON t.rowid = torrents_fts.rowid`
+		conds = append(conds, `torrents_fts MATCH ?`)
+		args = append(args, strings.Join(ftsTerms, " AND "))
+		order = ` ORDER BY bm25(torrents_fts), t.created_at DESC`
+	}
+	for _, kw := range shortTerms {
+		conds = append(conds, `(t.name LIKE ? ESCAPE '\\' OR t.clean_name LIKE ? ESCAPE '\\')`)
+		args = append(args, "%"+escapeLike(kw)+"%", "%"+escapeLike(kw)+"%")
+	}
+	where := " WHERE " + strings.Join(conds, " AND ")
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*)`+from+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := selectCols + where + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	q := `SELECT t.info_hash, IIF(t.clean_name <> '', t.clean_name, t.name),
+		t.total_size, t.file_count, t.files, t.created_at` + from + where + order + ` LIMIT ? OFFSET ?`
 	rows, err := s.db.QueryContext(ctx, q, append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
 		return nil, 0, err
