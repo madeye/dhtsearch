@@ -22,6 +22,7 @@ import (
 	"dhtsearch/server/internal/moderator"
 	"dhtsearch/server/internal/scraper"
 	"dhtsearch/server/internal/store"
+	"dhtsearch/server/internal/trending"
 )
 
 // defaultTrackers are large, long-lived open trackers. They serve both
@@ -142,6 +143,14 @@ func main() {
 		"max concurrent search queries before shedding load")
 	searchTimeout := flag.Duration("search-timeout", envDuration("SEARCH_TIMEOUT", 10*time.Second),
 		"database time budget for one search request")
+
+	// Douban trending quick-search chips.
+	trendEnabled := flag.Bool("trending", envBool("TRENDING_ENABLED", true),
+		"periodically fetch Douban hot movie/TV titles for /api/trending")
+	trendInterval := flag.Duration("trending-interval", envDuration("TRENDING_INTERVAL", time.Hour),
+		"how often to refresh the Douban trending lists")
+	trendLimit := flag.Int("trending-limit", envInt("TRENDING_LIMIT", 10),
+		"titles to keep per trending list")
 
 	// LLM moderation pass.
 	modEnabled := flag.Bool("moderate", envBool("MODERATION_ENABLED", true),
@@ -289,6 +298,25 @@ func main() {
 		}
 	}
 
+	// Douban trending fetcher for the homepage quick-search chips.
+	var trendFn func() api.Trending
+	if *trendEnabled {
+		svc := trending.New(trending.Config{
+			Interval: *trendInterval,
+			Limit:    *trendLimit,
+			Logger:   logger,
+		})
+		go svc.Run(ctx)
+		trendFn = func() api.Trending {
+			snap := svc.Get()
+			t := api.Trending{Movies: snap.Movies, TV: snap.TV}
+			if !snap.UpdatedAt.IsZero() {
+				t.UpdatedAt = snap.UpdatedAt.Unix()
+			}
+			return t
+		}
+	}
+
 	// Mirror the crawler's in-memory seen count and the fetch outcome
 	// counters into the stats table periodically. Both are process-local and
 	// monotonic, so only the delta since the last tick is applied.
@@ -333,6 +361,7 @@ func main() {
 			MaxInflight:   *searchInflight,
 			SearchTimeout: *searchTimeout,
 			ScraperStatus: scraperStatus(scr),
+			Trending:      trendFn,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,

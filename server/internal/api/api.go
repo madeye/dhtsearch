@@ -52,6 +52,17 @@ type Options struct {
 	StatsTTL time.Duration
 	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
 	ScraperStatus func() ScraperStatus
+	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
+	// makes the endpoint serve empty lists so the frontend degrades quietly.
+	Trending func() Trending
+}
+
+// Trending is the payload for /api/trending: Douban's current hot movie and
+// TV titles, for the homepage's quick-search chips.
+type Trending struct {
+	Movies    []string `json:"movies"`
+	TV        []string `json:"tv"`
+	UpdatedAt int64    `json:"updated_at"`
 }
 
 // CrawlerStatus describes the crawler for the stats endpoint. The sampler
@@ -133,6 +144,7 @@ func New(st *store.Store, crawlerStatus func() CrawlerStatus, logger *log.Logger
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /api/trending", s.handleTrending)
 	mux.HandleFunc("GET /api/healthz", s.handleHealth)
 	s.mux = mux
 	return s
@@ -338,6 +350,21 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	s.statsBody, s.statsAt = body, time.Now()
 	writeRawJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) handleTrending(w http.ResponseWriter, r *http.Request) {
+	t := Trending{Movies: []string{}, TV: []string{}}
+	if s.opts.Trending != nil {
+		got := s.opts.Trending()
+		if got.Movies != nil {
+			t.Movies = got.Movies
+		}
+		if got.TV != nil {
+			t.TV = got.TV
+		}
+		t.UpdatedAt = got.UpdatedAt
+	}
+	writeJSON(w, http.StatusOK, t)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
