@@ -85,6 +85,8 @@ export async function fetchSearch(
 export interface TrendingResponse {
   movies?: string[];
   tv?: string[];
+  tv_jp?: string[];
+  tv_kr?: string[];
   updated_at?: number;
 }
 

@@ -25,9 +25,13 @@ func stub(fail *atomic.Bool, abstractCalls *atomic.Int64) http.Handler {
 		}
 		switch r.URL.Path {
 		case "/j/search_subjects":
-			switch r.URL.Query().Get("type") {
-			case "movie":
+			switch tag := r.URL.Query().Get("tag"); {
+			case r.URL.Query().Get("type") == "movie":
 				fmt.Fprint(w, `{"subjects":[{"id":"1","title":"痴迷"},{"id":"3","title":"无名之辈"}]}`)
+			case tag == "日剧":
+				fmt.Fprint(w, `{"subjects":[{"id":"4","title":"直到T恤干透"}]}`)
+			case tag == "韩剧":
+				fmt.Fprint(w, `{"subjects":[{"id":"5","title":"铁拳教育"}]}`)
 			default:
 				fmt.Fprint(w, `{"subjects":[{"id":"2","title":"瑞克和莫蒂 第九季"}]}`)
 			}
@@ -56,6 +60,16 @@ func TestFetchResolvesEnglishTitles(t *testing.T) {
 	if got := snap.TV; len(got) != 1 || got[0] != "Rick and Morty Season 9" {
 		t.Fatalf("tv = %v", got)
 	}
+	// JP/KR charts keep Chinese titles and must not hit subject_abstract.
+	if got := snap.TVJP; len(got) != 1 || got[0] != "直到T恤干透" {
+		t.Fatalf("tv_jp = %v", got)
+	}
+	if got := snap.TVKR; len(got) != 1 || got[0] != "铁拳教育" {
+		t.Fatalf("tv_kr = %v", got)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("abstract calls = %d, want 3 (english charts only)", calls.Load())
+	}
 	if snap.UpdatedAt.IsZero() {
 		t.Fatal("UpdatedAt not set")
 	}
@@ -72,7 +86,7 @@ func TestFetchResolvesEnglishTitles(t *testing.T) {
 	prev := svc.Get()
 	svc.refresh(context.Background())
 	after := svc.Get()
-	if len(after.Movies) != 2 || len(after.TV) != 1 {
+	if len(after.Movies) != 2 || len(after.TV) != 1 || len(after.TVJP) != 1 || len(after.TVKR) != 1 {
 		t.Fatalf("snapshot lost after failed refresh: %+v", after)
 	}
 	if !after.UpdatedAt.Equal(prev.UpdatedAt) {
@@ -87,7 +101,7 @@ func TestEmptySubjectsIsError(t *testing.T) {
 	defer srv.Close()
 
 	svc := New(Config{BaseURL: srv.URL})
-	if _, err := svc.fetchList(context.Background(), "movie", "欧美"); err == nil {
+	if _, err := svc.fetchList(context.Background(), "movie", "欧美", true); err == nil {
 		t.Fatal("expected error for empty subjects")
 	}
 }

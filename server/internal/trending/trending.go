@@ -55,10 +55,12 @@ type Config struct {
 	Logger  *log.Logger
 }
 
-// Snapshot is the current trending state. Slices are never nil.
+// Snapshot is the current trending state.
 type Snapshot struct {
-	Movies    []string
-	TV        []string
+	Movies    []string // 欧美 movies
+	TV        []string // 美剧
+	TVJP      []string // 日剧
+	TVKR      []string // 韩剧
 	UpdatedAt time.Time
 }
 
@@ -119,28 +121,44 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-// refresh fetches both lists. A list that fails keeps its previous value, so
-// one bad response never blanks the homepage section. Movies use Douban's
-// 欧美 tag, TV the 美剧 tag (the tv type has no 欧美 tag).
+// charts are the Douban lists backing the homepage rows. Western charts
+// resolve each subject's English name (torrent names carry those); Japanese
+// and Korean dramas keep the Chinese chart title, which is what Chinese
+// release names use.
+var charts = []struct {
+	typ, tag string
+	english  bool
+	apply    func(*Snapshot, []string)
+}{
+	{"movie", "欧美", true, func(sn *Snapshot, t []string) { sn.Movies = t }},
+	{"tv", "美剧", true, func(sn *Snapshot, t []string) { sn.TV = t }},
+	{"tv", "日剧", false, func(sn *Snapshot, t []string) { sn.TVJP = t }},
+	{"tv", "韩剧", false, func(sn *Snapshot, t []string) { sn.TVKR = t }},
+}
+
+// refresh fetches every chart. A chart that fails keeps its previous value,
+// so one bad response never blanks a homepage row.
 func (s *Service) refresh(ctx context.Context) {
-	movies, errM := s.fetchList(ctx, "movie", "欧美")
-	tv, errT := s.fetchList(ctx, "tv", "美剧")
-	if errM != nil {
-		s.cfg.Logger.Printf("trending: movie fetch: %v", errM)
+	type result struct {
+		apply  func(*Snapshot, []string)
+		titles []string
 	}
-	if errT != nil {
-		s.cfg.Logger.Printf("trending: tv fetch: %v", errT)
+	var ok []result
+	for _, c := range charts {
+		titles, err := s.fetchList(ctx, c.typ, c.tag, c.english)
+		if err != nil {
+			s.cfg.Logger.Printf("trending: %s/%s fetch: %v", c.typ, c.tag, err)
+			continue
+		}
+		ok = append(ok, result{c.apply, titles})
 	}
-	if errM != nil && errT != nil {
+	if len(ok) == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if errM == nil {
-		s.snap.Movies = movies
-	}
-	if errT == nil {
-		s.snap.TV = tv
+	for _, r := range ok {
+		r.apply(&s.snap, r.titles)
 	}
 	s.snap.UpdatedAt = time.Now()
 }
@@ -150,9 +168,9 @@ type subject struct {
 	Title string `json:"title"`
 }
 
-// fetchList pulls one chart and returns its titles, resolved to English
-// names where possible.
-func (s *Service) fetchList(ctx context.Context, typ, tag string) ([]string, error) {
+// fetchList pulls one chart and returns its titles; english resolves each
+// title to the subject's English name where one exists.
+func (s *Service) fetchList(ctx context.Context, typ, tag string, english bool) ([]string, error) {
 	u := fmt.Sprintf("%s/j/search_subjects?type=%s&tag=%s&page_limit=%d&page_start=0",
 		s.cfg.BaseURL, typ, url.QueryEscape(tag), s.cfg.Limit)
 	body, err := s.get(ctx, u)
@@ -175,7 +193,11 @@ func (s *Service) fetchList(ctx context.Context, typ, tag string) ([]string, err
 		if sub.Title == "" {
 			continue
 		}
-		titles = append(titles, s.englishTitle(ctx, sub))
+		if english {
+			titles = append(titles, s.englishTitle(ctx, sub))
+		} else {
+			titles = append(titles, sub.Title)
+		}
 	}
 	if len(titles) == 0 {
 		return nil, fmt.Errorf("no titles in response")

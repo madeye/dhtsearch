@@ -60,8 +60,10 @@ type Options struct {
 // Trending is the payload for /api/trending: Douban's current hot movie and
 // TV titles, for the homepage's quick-search chips.
 type Trending struct {
-	Movies    []string `json:"movies"`
-	TV        []string `json:"tv"`
+	Movies    []string `json:"movies"` // 欧美 movies, English names
+	TV        []string `json:"tv"`     // 美剧, English names
+	TVJP      []string `json:"tv_jp"`  // 日剧, Chinese names
+	TVKR      []string `json:"tv_kr"`  // 韩剧, Chinese names
 	UpdatedAt int64    `json:"updated_at"`
 }
 
@@ -353,14 +355,18 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTrending(w http.ResponseWriter, r *http.Request) {
-	t := Trending{Movies: []string{}, TV: []string{}}
+	t := Trending{Movies: []string{}, TV: []string{}, TVJP: []string{}, TVKR: []string{}}
 	if s.opts.Trending != nil {
 		got := s.opts.Trending()
-		if got.Movies != nil {
-			t.Movies = got.Movies
-		}
-		if got.TV != nil {
-			t.TV = got.TV
+		for dst, src := range map[*[]string][]string{
+			&t.Movies: got.Movies,
+			&t.TV:     got.TV,
+			&t.TVJP:   got.TVJP,
+			&t.TVKR:   got.TVKR,
+		} {
+			if src != nil {
+				*dst = src
+			}
 		}
 		t.UpdatedAt = got.UpdatedAt
 	}
