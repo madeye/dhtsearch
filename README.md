@@ -134,6 +134,26 @@ npm run dev                  # 开发
 # 或 npm run build && npm run start   # 生产
 ```
 
+## 二进制发布
+
+仓库内置了 GitHub Actions 工作流 `.github/workflows/binary-release.yml`，用于打包
+`dhtsearch-server` 的跨平台二进制归档：
+
+- `pull_request` 与 `workflow_dispatch`：只构建并上传 workflow artifact，不创建 GitHub Release
+- `push` 到 `v*` tag（如 `v1.2.3`）：构建相同产物，并把它们发布到对应的 GitHub Release
+- 当前打包目标：`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`、`windows/amd64`、`windows/arm64`
+
+每个目标都会生成一个 `tar.gz` 归档，命名格式如下：
+
+```text
+dhtsearch-server_<version>_<goos>_<goarch>.tar.gz
+```
+
+同时会附带一个 `SHA256SUMS` 文件，包含全部归档的校验和。Windows 归档内的可执行文件名为
+`dhtsearch-server.exe`，其余平台为 `dhtsearch-server`。构建使用 `server/go.mod` 里的 Go
+版本，并以 `CGO_ENABLED=0`、`-trimpath`、`-buildvcs=false` 与固定归档时间戳打包，尽量保证
+可复现输出。
+
 ## API
 
 - `GET /api/search?q=xx&page=1&page_size=20` — 搜索（q 为空返回最新收录），结果含拼好的 magnet 链接

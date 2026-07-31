@@ -1,0 +1,148 @@
+name: Binary Release
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build cross-platform archives
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Compute artifact metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            version="pr-${{ github.event.pull_request.number }}-${GITHUB_SHA::7}"
+          else
+            version="manual-${GITHUB_SHA::7}"
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=dhtsearch-server-${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build reproducible archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.meta.outputs.version }}"
+          dist_dir="${RUNNER_TEMP}/dist"
+          fixed_timestamp=200001010000
+          targets=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
+          )
+
+          rm -rf "${dist_dir}"
+          mkdir -p "${dist_dir}"
+
+          for target in "${targets[@]}"; do
+            IFS=/ read -r goos goarch <<< "${target}"
+            base="dhtsearch-server_${version}_${goos}_${goarch}"
+            stage_dir="${RUNNER_TEMP}/${base}"
+            binary_name="dhtsearch-server"
+
+            if [[ "${goos}" == "windows" ]]; then
+              binary_name="${binary_name}.exe"
+            fi
+
+            rm -rf "${stage_dir}"
+            mkdir -p "${stage_dir}"
+
+            (
+              cd server
+              GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 \
+                go build \
+                  -trimpath \
+                  -buildvcs=false \
+                  -ldflags='-buildid=' \
+                  -o "${stage_dir}/${binary_name}" \
+                  ./cmd/server
+            )
+
+            cp LICENSE "${stage_dir}/LICENSE"
+            TZ=UTC touch -t "${fixed_timestamp}" \
+              "${stage_dir}/${binary_name}" \
+              "${stage_dir}/LICENSE"
+
+            tar \
+              --sort=name \
+              --mtime='UTC 2000-01-01' \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -C "${stage_dir}" \
+              -czf "${dist_dir}/${base}.tar.gz" \
+              LICENSE \
+              "${binary_name}"
+          done
+
+          (
+            cd "${dist_dir}"
+            sha256sum ./*.tar.gz > SHA256SUMS
+          )
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: |
+            ${{ runner.temp }}/dist/*.tar.gz
+            ${{ runner.temp }}/dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged archives
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ needs.build.outputs.version }}"
+
+          if gh release view "${version}" >/dev/null 2>&1; then
+            echo "release ${version} already exists; refusing to replace immutable assets" >&2
+            exit 1
+          fi
+
+          gh release create "${version}" dist/* --generate-notes
