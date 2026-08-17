@@ -69,7 +69,14 @@ seeder 数，然后按 seeder 数从高到低喂给获取端——热门资源�
 身就在提升吞吐。
 
 同一份 `TRACKERS` 列表还会以 `&tr=` 附在获取端的磁力链接上：tracker 一次往返就
-能拿到 peer 列表，省掉吃掉大半 `META_TIMEOUT` 的 DHT 找 peer 游走。
+能拿到 peer 列表，省掉吃掉大半 `META_TIMEOUT` 的 DHT 找 peer 游走。默认列表分
+两类：UDP 的大型 open tracker（opentrackr、demonii 等，外加美剧/韩剧/日剧发布
+——EZTV 及各类 TV 资源——常挂的 open.stealth.si、tracker.dler.org、tracker.qu.ax、
+tracker-udp.gbitt.info），既参与 scrape 排序也作 peer 提示；以及中国字幕组发布
+（动漫花园 / 蜜柑 / Nyaa 上的桜都、喵萌、北宇治等）常用的 HTTP tracker
+（nyaa.tracker.wf、t.nyaatracker.com、opentracker.acgnx.se）——HTTP 不能参与
+BEP 15 scrape，只作 peer 提示，但字幕组种子的 peer 往往只在这些 tracker 上，
+加了才能在超时内拿到 metadata。
 
 看 `/api/stats` 的 `scraper` 段：`seeded/scraped` 是命中率（有 seeder 的占比），
 `queue` 是排队深度，`evicted` 是被挤掉的低优先级 hash，`scrape_errors` 持续增长
