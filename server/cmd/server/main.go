@@ -28,10 +28,27 @@ import (
 // defaultTrackers are large, long-lived open trackers. They serve both
 // pipeline roles (scrape ranking and magnet peer hints); the list is
 // overridable via TRACKERS for when one of them inevitably goes away.
+// The second udp block are the open trackers US/KR/JP TV (美剧/韩剧/日剧)
+// releases (EZTV and friends) announce to — scrapeable, so they also widen
+// seeder-ranking coverage for those swarms. The http:// entries are the ACG
+// trackers Chinese fansub groups (字幕组) announce to — Nyaa's and AcgnX's,
+// carried by dmhy/Mikan/bangumi.moe releases. Only udp:// entries are
+// scrapeable, so http ones contribute peer hints only, but for fansub
+// swarms that hint is what makes metadata fetch land inside META_TIMEOUT.
+// All entries probed alive 2026-08 from both deploy vantage points;
+// notable dead ones checked: t.acg.rip, tr.bangumi.moe,
+// open.acgnxtracker.com, explodie.org (local), tracker.ololosh.space.
 const defaultTrackers = "udp://tracker.opentrackr.org:1337/announce," +
 	"udp://open.demonii.com:1337/announce," +
 	"udp://tracker.torrent.eu.org:451/announce," +
-	"udp://exodus.desync.com:6969/announce"
+	"udp://exodus.desync.com:6969/announce," +
+	"udp://open.stealth.si:80/announce," +
+	"udp://tracker.dler.org:6969/announce," +
+	"udp://tracker.qu.ax:6969/announce," +
+	"udp://tracker-udp.gbitt.info:80/announce," +
+	"http://nyaa.tracker.wf:7777/announce," +
+	"http://t.nyaatracker.com/announce," +
+	"http://opentracker.acgnx.se/announce"
 
 // envDefault returns the env value or fallback.
 func envDefault(key, fallback string) string {
