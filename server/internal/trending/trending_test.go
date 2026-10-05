@@ -124,3 +124,27 @@ func TestExtractEnglish(t *testing.T) {
 		}
 	}
 }
+
+func TestReadyClosesAfterFirstRefresh(t *testing.T) {
+	var fail atomic.Bool
+	var calls atomic.Int64
+	srv := httptest.NewServer(stub(&fail, &calls))
+	defer srv.Close()
+	svc := New(Config{BaseURL: srv.URL, Interval: time.Hour})
+	select {
+	case <-svc.Ready():
+		t.Fatal("ready before any refresh")
+	default:
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go svc.Run(ctx)
+	select {
+	case <-svc.Ready():
+	case <-time.After(30 * time.Second):
+		t.Fatal("ready never closed")
+	}
+	if len(svc.Get().TVJP) == 0 {
+		t.Fatal("snapshot not populated when ready closed")
+	}
+}

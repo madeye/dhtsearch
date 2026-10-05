@@ -24,6 +24,10 @@ type Torrent struct {
 	FileCount int           `json:"file_count"`
 	Files     []filter.File `json:"files"`
 	CreatedAt int64         `json:"created_at"`
+	// Alias is the release's title as published on an RSS source (e.g. a
+	// dmhy page title carrying the Chinese and Japanese names), where the
+	// torrent's own name is often romaji only. Searched alongside the name.
+	Alias string `json:"alias,omitempty"`
 }
 
 // Candidate is the slim projection of a torrent handed to the moderation
@@ -65,7 +69,10 @@ CREATE TABLE IF NOT EXISTS torrents (
 	-- Title with promotional junk stripped by the moderation pass. Empty means
 	-- "not trimmed"; name always keeps the raw title so trimming is reversible
 	-- and search still matches text that only appears in the original.
-	clean_name  TEXT NOT NULL DEFAULT ''
+	clean_name  TEXT NOT NULL DEFAULT '',
+	-- Publisher-side title from an RSS source (see Torrent.Alias); empty when
+	-- the torrent was only seen on the DHT.
+	alias       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS stats (
 	key   TEXT PRIMARY KEY,
@@ -91,6 +98,7 @@ CREATE TABLE IF NOT EXISTS blocked (
 	for _, m := range []struct{ name, stmt string }{
 		{"reviewed_at", `ALTER TABLE torrents ADD COLUMN reviewed_at INTEGER NOT NULL DEFAULT 0`},
 		{"clean_name", `ALTER TABLE torrents ADD COLUMN clean_name TEXT NOT NULL DEFAULT ''`},
+		{"alias", `ALTER TABLE torrents ADD COLUMN alias TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := db.Exec(m.stmt); err != nil &&
 			!strings.Contains(err.Error(), "duplicate column name") {
@@ -246,15 +254,34 @@ func (s *Store) Upsert(t Torrent) error {
 		return err
 	}
 	_, err = s.db.Exec(
-		`INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files, created_at)
-		 SELECT ?, ?, ?, ?, ?, ?
+		`INSERT OR IGNORE INTO torrents (info_hash, name, total_size, file_count, files, created_at, alias)
+		 SELECT ?, ?, ?, ?, ?, ?, ?
 		 WHERE NOT EXISTS (SELECT 1 FROM blocked WHERE info_hash = ?)`,
-		t.InfoHash, t.Name, t.TotalSize, t.FileCount, compressFiles(fj), t.CreatedAt, t.InfoHash)
+		t.InfoHash, t.Name, t.TotalSize, t.FileCount, compressFiles(fj), t.CreatedAt, t.Alias, t.InfoHash)
 	return err
 }
 
+// SetAlias records an RSS-side title for an already indexed torrent. It
+// reports whether the torrent exists; false means it still has to be
+// fetched (or was blocked — see IsBlocked).
+func (s *Store) SetAlias(infoHash, alias string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE torrents SET alias = ? WHERE info_hash = ?`, alias, infoHash)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// IsBlocked reports whether moderation rejected infoHash.
+func (s *Store) IsBlocked(infoHash string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM blocked WHERE info_hash = ?`, infoHash).Scan(&n)
+	return n > 0, err
+}
+
 // maxKeywords bounds how many query keywords turn into LIKE conditions.
-// Each keyword adds two LIKE evaluations per scanned row, so an unbounded
+// Each keyword adds three LIKE evaluations per scanned row, so an unbounded
 // list lets one request multiply its own scan cost ~100x. Past a handful of
 // keywords extra terms only narrow an already tiny result set; the tail is
 // ignored.
@@ -263,9 +290,9 @@ const maxKeywords = 8
 // selectCols is the projection shared by Search and Latest, decoded by
 // scanTorrents.
 const selectCols = `SELECT info_hash, IIF(clean_name <> '', clean_name, name),
-	total_size, file_count, files, created_at FROM torrents`
+	total_size, file_count, files, created_at, alias FROM torrents`
 
-// Search finds torrents whose name contains every space-separated keyword
+// Search finds torrents whose name or alias contains every space-separated keyword
 // of query (AND semantics), newest first. An empty query returns the latest
 // additions. page is 1-based; pageSize must be > 0. ctx bounds the queries:
 // keyword matching is a full-table scan, so callers must be able to cut it
@@ -284,9 +311,12 @@ func (s *Store) Search(ctx context.Context, query string, page, pageSize int) (i
 		for _, kw := range keywords {
 			// Match either title: the raw one so trimming can never hide a
 			// result, and the cleaned one so a phrase that only reads
-			// contiguously once the ad text is gone still matches.
-			conds = append(conds, "(name LIKE ? ESCAPE '\\' OR clean_name LIKE ? ESCAPE '\\')")
-			args = append(args, "%"+escapeLike(kw)+"%", "%"+escapeLike(kw)+"%")
+			// contiguously once the ad text is gone still matches. The alias
+			// carries the publisher's title, often the only place a Chinese
+			// name appears for a romaji-named release.
+			conds = append(conds, "(name LIKE ? ESCAPE '\\' OR clean_name LIKE ? ESCAPE '\\' OR alias LIKE ? ESCAPE '\\')")
+			like := "%" + escapeLike(kw) + "%"
+			args = append(args, like, like, like)
 		}
 		where = " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -324,7 +354,7 @@ func scanTorrents(rows *sql.Rows) (items []Torrent, err error) {
 	for rows.Next() {
 		var t Torrent
 		var fb []byte
-		if err := rows.Scan(&t.InfoHash, &t.Name, &t.TotalSize, &t.FileCount, &fb, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.InfoHash, &t.Name, &t.TotalSize, &t.FileCount, &fb, &t.CreatedAt, &t.Alias); err != nil {
 			return nil, err
 		}
 		fj, err := decompressFiles(fb)

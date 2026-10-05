@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"dhtsearch/server/internal/feeds"
 	"dhtsearch/server/internal/store"
 )
 
@@ -52,6 +53,8 @@ type Options struct {
 	StatsTTL time.Duration
 	// ScraperStatus, when non-nil, adds a "scraper" section to /api/stats.
 	ScraperStatus func() ScraperStatus
+	// FeedsStatus, when non-nil, adds a "feeds" section to /api/stats.
+	FeedsStatus func() feeds.Stats
 	// Trending, when non-nil, backs /api/trending. Nil (feature disabled)
 	// makes the endpoint serve empty lists so the frontend degrades quietly.
 	Trending func() Trending
@@ -176,6 +179,7 @@ func (s *Server) Handler() http.Handler {
 type resultItem struct {
 	InfoHash  string `json:"info_hash"`
 	Name      string `json:"name"`
+	Alias     string `json:"alias,omitempty"`
 	TotalSize int64  `json:"total_size"`
 	FileCount int    `json:"file_count"`
 	Files     any    `json:"files"`
@@ -249,6 +253,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		results = append(results, resultItem{
 			InfoHash:  t.InfoHash,
 			Name:      t.Name,
+			Alias:     t.Alias,
 			TotalSize: t.TotalSize,
 			FileCount: t.FileCount,
 			Files:     t.Files,
@@ -344,6 +349,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.opts.ScraperStatus != nil {
 		resp["scraper"] = s.opts.ScraperStatus()
+	}
+	if s.opts.FeedsStatus != nil {
+		resp["feeds"] = s.opts.FeedsStatus()
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {

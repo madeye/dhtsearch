@@ -33,6 +33,9 @@ export interface TorrentFile {
 export interface SearchResult {
   info_hash: string;
   name: string;
+  /** Publisher's title from an RSS source (dmhy/Nyaa), e.g. carrying the
+   *  Chinese name of a release whose torrent name is romaji only. */
+  alias?: string;
   total_size: number;
   file_count: number;
   files?: TorrentFile[];

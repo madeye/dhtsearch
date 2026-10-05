@@ -76,6 +76,11 @@ type Service struct {
 	// pay the subject_abstract call for subjects new to the charts. Only
 	// successful resolutions are cached; failures retry next interval.
 	names map[string]string
+
+	// ready closes once the first refresh attempt finishes, so consumers of
+	// the lists (the RSS keyword search) can wait for a populated snapshot.
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 // New builds a Service; call Run to start refreshing.
@@ -96,8 +101,12 @@ func New(cfg Config) *Service {
 		cfg:    cfg,
 		client: &http.Client{Timeout: fetchTimeout},
 		names:  make(map[string]string),
+		ready:  make(chan struct{}),
 	}
 }
+
+// Ready is closed after the first refresh attempt, successful or not.
+func (s *Service) Ready() <-chan struct{} { return s.ready }
 
 // Get returns the latest snapshot. Empty lists mean no successful fetch yet.
 func (s *Service) Get() Snapshot {
@@ -109,6 +118,7 @@ func (s *Service) Get() Snapshot {
 // Run refreshes immediately and then every Interval until ctx is done.
 func (s *Service) Run(ctx context.Context) {
 	s.refresh(ctx)
+	s.readyOnce.Do(func() { close(s.ready) })
 	t := time.NewTicker(s.cfg.Interval)
 	defer t.Stop()
 	for {

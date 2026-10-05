@@ -72,6 +72,17 @@ export default function ResultCard({
           >
             {result.name || "(未命名)"}
           </h3>
+          {/* The publisher's title, shown when it differs from the torrent
+              name — usually the Chinese name a romaji release was found by. */}
+          {result.alias && result.alias !== result.name && (
+            <p
+              className={`mt-0.5 text-xs wrap-anywhere text-zinc-500 ${
+                expanded ? "" : "line-clamp-1"
+              }`}
+            >
+              {result.alias}
+            </p>
+          )}
           <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-zinc-400">
             <span>{formatSize(result.total_size)}</span>
             <span>{formatCount(totalFiles)} 个文件</span>
