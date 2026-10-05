@@ -6,7 +6,7 @@
 // even once indexed, a release whose torrent name is romaji ("Jigoku ni
 // Ochiru Wa Yo") cannot be found by its Chinese title (地狱占星师), which
 // only exists on the publisher's page. Feeds closes both gaps: every item's
-// infohash goes straight to the metadata fetcher ahead of DHT discoveries,
+// infohash goes to a metadata fetcher of its own (not the DHT backlog),
 // and its title is stored as the torrent's alias, which search matches.
 //
 // Besides fixed feeds, an optional keyword source (the homepage's trending
@@ -85,6 +85,9 @@ type Stats struct {
 	Queued  int64 `json:"queued"`  // hashes sent to the fetcher
 	Aliased int64 `json:"aliased"` // indexed torrents given an alias
 	Errors  int64 `json:"errors"`  // failed feed requests
+	// Outcomes of the dedicated feed fetcher, filled in by the caller.
+	Fetched  int64 `json:"fetched"`
+	TimedOut int64 `json:"timed_out"`
 }
 
 type entry struct {
@@ -352,46 +355,4 @@ func normalizeHash(s string) string {
 		}
 	}
 	return ""
-}
-
-// Prioritize merges hi and lo into one channel, always draining hi first,
-// so feed hashes take the next free fetch worker ahead of the DHT backlog.
-// Either input may be nil. The output closes when ctx is done.
-func Prioritize(ctx context.Context, hi, lo <-chan string) <-chan string {
-	out := make(chan string)
-	go func() {
-		defer close(out)
-		for {
-			var v string
-			var ok bool
-			select {
-			case v, ok = <-hi:
-				if !ok {
-					hi = nil
-					continue
-				}
-			default:
-				select {
-				case <-ctx.Done():
-					return
-				case v, ok = <-hi:
-					if !ok {
-						hi = nil
-						continue
-					}
-				case v, ok = <-lo:
-					if !ok {
-						lo = nil
-						continue
-					}
-				}
-			}
-			select {
-			case out <- v:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	return out
 }

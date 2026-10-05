@@ -90,11 +90,11 @@ scrape），以及只作 peer 提示的 tracker1.itzmx.com、tracker.renfei.net�
 DHT 抽样碰到某个具体字幕组合集的概率很低；而且日剧种子名大多是罗马音
 （`[MagicStar] Jigoku ni Ochiru Wa Yo`），中文名（地狱占星师）只出现在发布页
 标题里，就算收录了也搜不到。所以服务端每 30 分钟拉一次发布站 RSS（默认动漫
-花园日剧区 + Nyaa 真人区），每条的 infohash 插队到获取端最前面（优先于 DHT
-积压），发布页标题存为该种子的 `alias`——搜索同时匹配种子名和 alias，结果卡片
+花园日剧区 + Nyaa 真人区），每条的 infohash 交给一个专用的小获取端（默认 16 并发、90 秒超时，不跟 DHT
+积压抢主获取端——那里大部分是死种，活跃的字幕组种子在里面也会超时），发布页标题存为该种子的 `alias`——搜索同时匹配种子名和 alias，结果卡片
 在种子名下方显示 alias。首页日剧/韩剧热门词还会逐个拿去动漫花园关键词 RSS 搜一
 遍，补上已经滚出 RSS 的老发布。已收录的种子只补 alias，不重复获取；获取超时的
-6 小时后重试，最多 3 次。`/api/stats` 的 `feeds` 段：`queued` 是送去获取的数量，
+6 小时后重试，最多 3 次。`/api/stats` 的 `feeds` 段：`queued` 是送去获取的数量，`fetched`/`timed_out` 是专用获取端的结果，
 `aliased` 是补上 alias 的已收录种子，`errors` 是拉 RSS 失败的次数。
 
 ## 快速开始

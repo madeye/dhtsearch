@@ -240,37 +240,3 @@ func TestKeywordSearch(t *testing.T) {
 		t.Fatalf("same hash from two searches must queue once: %v", got)
 	}
 }
-
-func TestPrioritize(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	hi := make(chan string, 4)
-	lo := make(chan string, 4)
-	lo <- "lo1"
-	lo <- "lo2"
-	hi <- "hi1"
-	hi <- "hi2"
-	out := Prioritize(ctx, hi, lo)
-	// The merger may have taken one value before hi was filled; after that,
-	// hi must drain before lo resumes.
-	var got []string
-	for i := 0; i < 4; i++ {
-		got = append(got, <-out)
-	}
-	pos := map[string]int{}
-	for i, v := range got {
-		pos[v] = i
-	}
-	if pos["hi2"] > pos["lo2"] {
-		t.Fatalf("order %v: hi not prioritized", got)
-	}
-
-	close(hi)
-	lo <- "lo3"
-	if v := <-out; v != "lo3" {
-		t.Fatalf("after hi closed got %q", v)
-	}
-	cancel()
-	for range out {
-	}
-}

@@ -140,11 +140,17 @@ func scraperStatus(scr *scraper.Scraper) func() api.ScraperStatus {
 	}
 }
 
-func feedsStatus(fs *feeds.Service) func() feeds.Stats {
+func feedsStatus(fs *feeds.Service, f *metadata.Fetcher) func() feeds.Stats {
 	if fs == nil {
 		return nil
 	}
-	return fs.Stats
+	return func() feeds.Stats {
+		st := fs.Stats()
+		if f != nil {
+			st.Fetched, st.TimedOut, _ = f.Stats()
+		}
+		return st
+	}
 }
 
 // feedAlias is the feed title for a fetched torrent, "" for DHT-only ones.
@@ -194,6 +200,10 @@ func main() {
 		"RSS search URL with one %s, queried with each trending 日剧/韩剧 title (empty = off)")
 	feedsInterval := flag.Duration("feeds-interval", envDuration("FEEDS_INTERVAL", 30*time.Minute),
 		"how often to poll the RSS feeds")
+	feedsWorkers := flag.Int("feeds-workers", envInt("FEEDS_WORKERS", 16),
+		"metadata fetch workers dedicated to feed infohashes")
+	feedsTimeout := flag.Duration("feeds-meta-timeout", envDuration("FEEDS_META_TIMEOUT", 90*time.Second),
+		"metadata fetch timeout per feed torrent")
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
@@ -279,6 +289,7 @@ func main() {
 	var fetcher *metadata.Fetcher
 	var scr *scraper.Scraper
 	var feedSvc *feeds.Service
+	var feedFetch *metadata.Fetcher
 	if *fetchMetadata {
 		var err error
 		fetcher, err = metadata.NewFetcher(metadata.Config{
@@ -305,6 +316,11 @@ func main() {
 				feed = scr.Out()
 			}
 		}
+		// Feed hashes get their own small fetcher rather than a place in the
+		// main one's queue: the main client runs META_WORKERS concurrent
+		// fetches of mostly dead DHT hashes, and a live fansub swarm that a
+		// standalone client fetches in seconds times out inside it.
+		var feedFetcher *metadata.Fetcher
 		if *feedsEnabled {
 			cfg := feeds.Config{
 				Feeds:    splitCSV(*feedsCSV),
@@ -333,9 +349,18 @@ func main() {
 				}
 				fs.Run(ctx)
 			}(feedSvc)
-			feed = feeds.Prioritize(ctx, feedSvc.Out(), feed)
+			feedFetcher, err = metadata.NewFetcher(metadata.Config{
+				Workers:  *feedsWorkers,
+				Timeout:  *feedsTimeout,
+				Trackers: trackerList,
+				Logger:   logger,
+			})
+			if err != nil {
+				logger.Fatalf("feeds metadata: %v", err)
+			}
+			defer feedFetcher.Close()
 		}
-		fetcher.Run(ctx, feed, func(rec metadata.Record) {
+		onRecord := func(rec metadata.Record) {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
 			if res.Adult {
 				st.IncrStat("adult_filtered", 1)
@@ -362,7 +387,12 @@ func main() {
 				return
 			}
 			st.IncrStat("fetched", 1)
-		})
+		}
+		fetcher.Run(ctx, feed, onRecord)
+		if feedFetcher != nil {
+			feedFetcher.Run(ctx, feedSvc.Out(), onRecord)
+			feedFetch = feedFetcher
+		}
 	} else {
 		// Bare infohash collection: no metadata, no filter.
 		go func() {
@@ -470,7 +500,7 @@ func main() {
 			MaxInflight:   *searchInflight,
 			SearchTimeout: *searchTimeout,
 			ScraperStatus: scraperStatus(scr),
-			FeedsStatus:   feedsStatus(feedSvc),
+			FeedsStatus:   feedsStatus(feedSvc, feedFetch),
 			Trending:      trendFn,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
