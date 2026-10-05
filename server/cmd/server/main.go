@@ -35,9 +35,16 @@ import (
 // carried by dmhy/Mikan/bangumi.moe releases. Only udp:// entries are
 // scrapeable, so http ones contribute peer hints only, but for fansub
 // swarms that hint is what makes metadata fetch land inside META_TIMEOUT.
-// All entries probed alive 2026-08 from both deploy vantage points;
-// notable dead ones checked: t.acg.rip, tr.bangumi.moe,
-// open.acgnxtracker.com, explodie.org (local), tracker.ololosh.space.
+// The last block is what 日剧字幕组 releases carry: 动漫花园's own tracker
+// (104.143.10.61, stamped on every torrent in its 日剧 section) and the
+// open trackers Nyaa live-action uploads list (udp, scrapeable), plus two
+// http peer-hint-only ones from the same announce lists.
+// All entries probed alive 2026-08 (last block 2026-10) from both deploy
+// vantage points; notable dead ones checked: t.acg.rip, tr.bangumi.moe,
+// open.acgnxtracker.com, explodie.org (local), tracker.ololosh.space,
+// 104.238.198.186 (dmhy's old tracker), open.acgtracker.com,
+// tracker.ktxp.com, tracker{2,3,4}.itzmx.com (VPS), tracker.bittor.pw
+// (announces but times out on scrape).
 const defaultTrackers = "udp://tracker.opentrackr.org:1337/announce," +
 	"udp://open.demonii.com:1337/announce," +
 	"udp://tracker.torrent.eu.org:451/announce," +
@@ -48,7 +55,12 @@ const defaultTrackers = "udp://tracker.opentrackr.org:1337/announce," +
 	"udp://tracker-udp.gbitt.info:80/announce," +
 	"http://nyaa.tracker.wf:7777/announce," +
 	"http://t.nyaatracker.com/announce," +
-	"http://opentracker.acgnx.se/announce"
+	"http://opentracker.acgnx.se/announce," +
+	"udp://104.143.10.61:8000/announce," +
+	"udp://t.overflow.biz:6969/announce," +
+	"udp://tracker.skynetcloud.site:6969/announce," +
+	"http://tracker1.itzmx.com:8080/announce," +
+	"http://tracker.renfei.net:8080/announce"
 
 // envDefault returns the env value or fallback.
 func envDefault(key, fallback string) string {

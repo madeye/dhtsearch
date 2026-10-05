@@ -76,7 +76,10 @@ tracker-udp.gbitt.info），既参与 scrape 排序也作 peer 提示；以及�
 （动漫花园 / 蜜柑 / Nyaa 上的桜都、喵萌、北宇治等）常用的 HTTP tracker
 （nyaa.tracker.wf、t.nyaatracker.com、opentracker.acgnx.se）——HTTP 不能参与
 BEP 15 scrape，只作 peer 提示，但字幕组种子的 peer 往往只在这些 tracker 上，
-加了才能在超时内拿到 metadata。
+加了才能在超时内拿到 metadata。日剧字幕组的发布（动漫花园日剧区、Nyaa
+真人区）另外覆盖了动漫花园自家的 tracker（udp://104.143.10.61:8000，日剧区
+每个种子都带）和 t.overflow.biz、tracker.skynetcloud.site（均为 UDP，可
+scrape），以及只作 peer 提示的 tracker1.itzmx.com、tracker.renfei.net。
 
 看 `/api/stats` 的 `scraper` 段：`seeded/scraped` 是命中率（有 seeder 的占比），
 `queue` 是排队深度，`evicted` 是被挤掉的低优先级 hash，`scrape_errors` 持续增长
