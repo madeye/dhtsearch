@@ -328,3 +328,60 @@ func TestSetCleanNamesEmptyMapIsNoOp(t *testing.T) {
 		t.Fatalf("SetCleanNames(nil) = %d, %v; want 0, nil", n, err)
 	}
 }
+
+func TestAliasSearchAndSetAlias(t *testing.T) {
+	s := openTest(t)
+	// Inserted with an alias, as a feed-sourced fetch does.
+	if err := s.Upsert(Torrent{InfoHash: "aa", Name: "[MagicStar] Jigoku ni Ochiru Wa Yo 2026 [WEBDL]",
+		TotalSize: 1 << 30, FileCount: 1, CreatedAt: 100,
+		Alias: "【合集】[MagicStar] 地狱占星师 / 地獄に堕ちるわよ [WEBDL]"}); err != nil {
+		t.Fatal(err)
+	}
+	// Indexed from the DHT first, aliased later.
+	if err := s.Upsert(Torrent{InfoHash: "bb", Name: "[MagicStar] Unnatural EP01", TotalSize: 1 << 30,
+		FileCount: 1, CreatedAt: 200}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, total, err := s.Search(t.Context(), "地狱占星师", 1, 10)
+	if err != nil || total != 1 || items[0].InfoHash != "aa" {
+		t.Fatalf("alias search: items=%v total=%d err=%v", items, total, err)
+	}
+	if items[0].Name != "[MagicStar] Jigoku ni Ochiru Wa Yo 2026 [WEBDL]" || items[0].Alias == "" {
+		t.Fatalf("display name must stay the torrent name, alias returned: %+v", items[0])
+	}
+	// Keywords may split across name and alias.
+	if _, total, _ = s.Search(t.Context(), "地狱占星师 Jigoku", 1, 10); total != 1 {
+		t.Fatalf("mixed name/alias keywords: total=%d", total)
+	}
+
+	if _, total, _ = s.Search(t.Context(), "非自然死亡", 1, 10); total != 0 {
+		t.Fatalf("before SetAlias: total=%d", total)
+	}
+	ok, err := s.SetAlias("bb", "[MagicStar] 非自然死亡 / アンナチュラル")
+	if err != nil || !ok {
+		t.Fatalf("SetAlias existing: ok=%v err=%v", ok, err)
+	}
+	if _, total, _ = s.Search(t.Context(), "非自然死亡", 1, 10); total != 1 {
+		t.Fatalf("after SetAlias: total=%d", total)
+	}
+	if ok, err := s.SetAlias("zz", "missing"); err != nil || ok {
+		t.Fatalf("SetAlias missing: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestIsBlocked(t *testing.T) {
+	s := openTest(t)
+	if err := s.Upsert(Torrent{InfoHash: "aa", Name: "x", TotalSize: 1, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := s.IsBlocked("aa"); err != nil || b {
+		t.Fatalf("before block: %v %v", b, err)
+	}
+	if _, err := s.Block([]string{"aa"}, []string{"x"}, "adult", 1); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := s.IsBlocked("aa"); err != nil || !b {
+		t.Fatalf("after block: %v %v", b, err)
+	}
+}

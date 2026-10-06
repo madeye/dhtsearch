@@ -17,6 +17,7 @@ import (
 	"dhtsearch/server/internal/api"
 	"dhtsearch/server/internal/crawler"
 	"dhtsearch/server/internal/envfile"
+	"dhtsearch/server/internal/feeds"
 	"dhtsearch/server/internal/filter"
 	"dhtsearch/server/internal/metadata"
 	"dhtsearch/server/internal/moderator"
@@ -61,6 +62,17 @@ const defaultTrackers = "udp://tracker.opentrackr.org:1337/announce," +
 	"udp://tracker.skynetcloud.site:6969/announce," +
 	"http://tracker1.itzmx.com:8080/announce," +
 	"http://tracker.renfei.net:8080/announce"
+
+// defaultFeeds are the publisher RSS feeds polled for infohashes and
+// titles: dmhy's 日剧 section (500 items, titles carry the Chinese and
+// Japanese names) and Nyaa's live-action category.
+const defaultFeeds = "https://share.dmhy.org/topics/rss/sort_id/6/rss.xml," +
+	"https://nyaa.si/?page=rss&c=4_0"
+
+// defaultFeedKeywordURL searches dmhy by keyword; the trending 日剧/韩剧 chip
+// titles are looked up through it so a chip finds releases older than the
+// fixed feeds reach back.
+const defaultFeedKeywordURL = "https://share.dmhy.org/topics/rss/rss.xml?keyword=%s"
 
 // envDefault returns the env value or fallback.
 func envDefault(key, fallback string) string {
@@ -128,6 +140,27 @@ func scraperStatus(scr *scraper.Scraper) func() api.ScraperStatus {
 	}
 }
 
+func feedsStatus(fs *feeds.Service, f *metadata.Fetcher) func() feeds.Stats {
+	if fs == nil {
+		return nil
+	}
+	return func() feeds.Stats {
+		st := fs.Stats()
+		if f != nil {
+			st.Fetched, st.TimedOut, _ = f.Stats()
+		}
+		return st
+	}
+}
+
+// feedAlias is the feed title for a fetched torrent, "" for DHT-only ones.
+func feedAlias(fs *feeds.Service, infoHash string) string {
+	if fs == nil {
+		return ""
+	}
+	return fs.Alias(infoHash)
+}
+
 func envFloat(key string, fallback float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -159,6 +192,18 @@ func main() {
 		"comma-separated tracker announce URLs, used both to rank discovered infohashes (BEP 15 scrape) and as peer hints on fetch magnets (empty = neither)")
 	scrapeEnabled := flag.Bool("scrape", envBool("SCRAPE_ENABLED", true),
 		"rank discovered infohashes by tracker-scraped seeder count before fetching")
+	feedsEnabled := flag.Bool("feeds", envBool("FEEDS_ENABLED", true),
+		"poll publisher RSS feeds: fetch their infohashes ahead of DHT discoveries and store their titles as search aliases")
+	feedsCSV := flag.String("feeds-urls", envDefault("FEEDS", defaultFeeds),
+		"comma-separated RSS feed URLs")
+	feedKeywordURL := flag.String("feeds-keyword-url", envDefault("FEEDS_KEYWORD_URL", defaultFeedKeywordURL),
+		"RSS search URL with one %s, queried with each trending 日剧/韩剧 title (empty = off)")
+	feedsInterval := flag.Duration("feeds-interval", envDuration("FEEDS_INTERVAL", 30*time.Minute),
+		"how often to poll the RSS feeds")
+	feedsWorkers := flag.Int("feeds-workers", envInt("FEEDS_WORKERS", 16),
+		"metadata fetch workers dedicated to feed infohashes")
+	feedsTimeout := flag.Duration("feeds-meta-timeout", envDuration("FEEDS_META_TIMEOUT", 90*time.Second),
+		"metadata fetch timeout per feed torrent")
 	seedDemo := flag.Bool("seed-demo", false, "insert demo records at startup")
 	minSize := flag.Int64("min-size", envInt64("MIN_TORRENT_SIZE", 100<<20),
 		"skip torrents whose total size is below this many bytes")
@@ -231,9 +276,20 @@ func main() {
 
 	trackerList := splitCSV(*trackersCSV)
 
+	var trendSvc *trending.Service
+	if *trendEnabled {
+		trendSvc = trending.New(trending.Config{
+			Interval: *trendInterval,
+			Limit:    *trendLimit,
+			Logger:   logger,
+		})
+	}
+
 	// Pipeline: infohashes -> scrape ranking -> metadata -> filter -> store.
 	var fetcher *metadata.Fetcher
 	var scr *scraper.Scraper
+	var feedSvc *feeds.Service
+	var feedFetch *metadata.Fetcher
 	if *fetchMetadata {
 		var err error
 		fetcher, err = metadata.NewFetcher(metadata.Config{
@@ -260,7 +316,51 @@ func main() {
 				feed = scr.Out()
 			}
 		}
-		fetcher.Run(ctx, feed, func(rec metadata.Record) {
+		// Feed hashes get their own small fetcher rather than a place in the
+		// main one's queue: the main client runs META_WORKERS concurrent
+		// fetches of mostly dead DHT hashes, and a live fansub swarm that a
+		// standalone client fetches in seconds times out inside it.
+		var feedFetcher *metadata.Fetcher
+		if *feedsEnabled {
+			cfg := feeds.Config{
+				Feeds:    splitCSV(*feedsCSV),
+				Interval: *feedsInterval,
+				Store:    st,
+				Logger:   logger,
+			}
+			if trendSvc != nil && *feedKeywordURL != "" {
+				cfg.KeywordURL = *feedKeywordURL
+				cfg.Keywords = func() []string {
+					snap := trendSvc.Get()
+					return append(append([]string(nil), snap.TVJP...), snap.TVKR...)
+				}
+			}
+			feedSvc = feeds.New(cfg)
+			go func(fs *feeds.Service) {
+				// Let trending load first so the opening poll already
+				// searches the chip titles; bounded in case Douban hangs.
+				if trendSvc != nil {
+					select {
+					case <-trendSvc.Ready():
+					case <-time.After(2 * time.Minute):
+					case <-ctx.Done():
+						return
+					}
+				}
+				fs.Run(ctx)
+			}(feedSvc)
+			feedFetcher, err = metadata.NewFetcher(metadata.Config{
+				Workers:  *feedsWorkers,
+				Timeout:  *feedsTimeout,
+				Trackers: trackerList,
+				Logger:   logger,
+			})
+			if err != nil {
+				logger.Fatalf("feeds metadata: %v", err)
+			}
+			defer feedFetcher.Close()
+		}
+		onRecord := func(rec metadata.Record) {
 			res := filter.Check(rec.Name, rec.Files, rec.TotalSize)
 			if res.Adult {
 				st.IncrStat("adult_filtered", 1)
@@ -281,12 +381,18 @@ func main() {
 				FileCount: rec.FileCount,
 				Files:     rec.Files,
 				CreatedAt: time.Now().Unix(),
+				Alias:     feedAlias(feedSvc, rec.InfoHash),
 			}); err != nil {
 				logger.Printf("store upsert: %v", err)
 				return
 			}
 			st.IncrStat("fetched", 1)
-		})
+		}
+		fetcher.Run(ctx, feed, onRecord)
+		if feedFetcher != nil {
+			feedFetcher.Run(ctx, feedSvc.Out(), onRecord)
+			feedFetch = feedFetcher
+		}
 	} else {
 		// Bare infohash collection: no metadata, no filter.
 		go func() {
@@ -332,12 +438,8 @@ func main() {
 
 	// Douban trending fetcher for the homepage quick-search chips.
 	var trendFn func() api.Trending
-	if *trendEnabled {
-		svc := trending.New(trending.Config{
-			Interval: *trendInterval,
-			Limit:    *trendLimit,
-			Logger:   logger,
-		})
+	if trendSvc != nil {
+		svc := trendSvc
 		go svc.Run(ctx)
 		trendFn = func() api.Trending {
 			snap := svc.Get()
@@ -398,6 +500,7 @@ func main() {
 			MaxInflight:   *searchInflight,
 			SearchTimeout: *searchTimeout,
 			ScraperStatus: scraperStatus(scr),
+			FeedsStatus:   feedsStatus(feedSvc, feedFetch),
 			Trending:      trendFn,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
